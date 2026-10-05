@@ -1,0 +1,61 @@
+# Shared machine/editor state
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*.orig
+*.rej
+
+# Android / Gradle (also retain ANDROID/.gitignore unchanged)
+.gradle/
+.kotlin/
+**/build/
+.cxx/
+.externalNativeBuild/
+local.properties
+*.apk
+*.aab
+*.apks
+*.hprof
+*.log
+
+# Future Swift / Xcode generated and user-specific state
+.build/
+.swiftpm/
+DerivedData/
+Pods/
+Carthage/Build/
+xcuserdata/
+*.xcuserstate
+*.ipa
+*.dSYM/
+*.xcarchive/
+*.xcconfig.local
+
+# Local environment and Supabase client configuration
+.env
+.env.*
+local.env
+*.local.properties
+*.local.json
+supabase.local.properties
+secrets.properties
+credentials*.json
+GoogleService-Info.plist
+google-services.json
+
+# Signing material / private credentials
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile
+*.cer

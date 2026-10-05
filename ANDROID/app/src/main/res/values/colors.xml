@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand_crimson">#720D27</color>
+    <color name="brand_gold">#E2B449</color>
+    <color name="brand_off_white">#FFFBF4</color>
+    <color name="brand_ink">#271A1B</color>
+    <color name="brand_dark_surface">#201A1B</color>
+    <color name="brand_light_crimson">#FFB1BF</color>
+</resources>

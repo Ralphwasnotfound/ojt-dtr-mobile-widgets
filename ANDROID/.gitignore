@@ -1,0 +1,32 @@
+# Android / Gradle generated files
+.gradle/
+.kotlin/
+**/build/
+local.properties
+# Editor state
+.idea/
+*.iml
+.vscode/
+.DS_Store
+# Signing and secrets
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+.env
+.env.*
+*.pem
+*.p12
+*.key
+# Other generated/sensitive artifacts
+.cxx/
+.externalNativeBuild/
+*.hprof
+*.log
+*.apk
+*.aab
+secrets.properties
+credentials*.json
+
+# Android-only client configuration (values are embedded in the APK).
+supabase.local.properties
