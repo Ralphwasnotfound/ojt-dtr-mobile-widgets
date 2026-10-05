@@ -10,6 +10,8 @@ import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.providers.Google
 import io.github.jan.supabase.auth.FlowType
 import io.github.jan.supabase.auth.SignOutScope
+import io.github.jan.supabase.auth.status.SessionStatus
+import io.github.jan.supabase.auth.user.UserSession
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.logging.LogLevel
 import io.github.jan.supabase.postgrest.Postgrest
@@ -24,11 +26,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -39,11 +43,14 @@ import kotlin.coroutines.coroutineContext
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.seconds
 
-/** Application-owned authority. All SDK mutations are serialized; presentation only observes states. */
+/** Application authority: coordinator epochs plus revocable leases for SDK-owned background work. */
 class AuthCoordinator internal constructor(context: Context,
     private val configuration: ClientConfiguration? = ClientConfiguration.parse(BuildConfig.SUPABASE_URL, BuildConfig.SUPABASE_CLIENT_KEY),
-    private val engine: HttpClientEngine? = null,
+    private val engineFactory: () -> HttpClientEngine? = { null },
     keyAlias: String = "dtr.native.auth.v1",
+    private val beforeVerifierSave: suspend () -> Unit = {},
+    private val beforeSessionDelete: suspend () -> Unit = {},
+    private val onClientCreated: (SupabaseClient) -> Unit = {},
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val mutableState = MutableStateFlow<AccountState>(AccountState.RestoringSession)
@@ -56,6 +63,9 @@ class AuthCoordinator internal constructor(context: Context,
     private val sessions = SecureSessionManager(storage)
     private val pkce = SecurePkceCache(storage)
     private var client: SupabaseClient? = null
+    private val storageFence = SdkStorageFence()
+    private var sessionObserver: Job? = null
+    private var authorizedSession: UserSession? = null
     private var operation: Job? = null
     private var refresh: Job? = null
     private var expiry: Job? = null
@@ -71,23 +81,7 @@ class AuthCoordinator internal constructor(context: Context,
                     publish(generation, AccountState.AccessUnavailable(Failure.Configuration))
                     return@launch
                 }
-                client = createSupabaseClient(config.url, config.clientKey) {
-                    httpEngine = engine
-                    defaultLogLevel = LogLevel.NONE // SDK debug logs include session representations.
-                    install(Auth) {
-                        flowType = FlowType.PKCE
-                        scheme = "ph.edu.bsit.tcc.ojtdtr"
-                        host = "auth"
-                        sessionManager = sessions
-                        codeVerifierCache = pkce
-                        autoLoadFromStorage = false
-                        autoSaveToStorage = true
-                        // Own refresh jobs with the same cancellation/epoch/mutex policy as logout.
-                        alwaysAutoRefresh = false
-                    }
-                    install(Postgrest)
-                }
-                client!!.auth.awaitInitialization()
+                createClient()
                 operationMutex.withLock {
                     val stored = sessions.loadSession()
                     if (stored != null) {
@@ -109,6 +103,47 @@ class AuthCoordinator internal constructor(context: Context,
         }
     }
 
+    private suspend fun createClient() {
+        val config = configuration ?: return
+        val owner = storageFence.replace() // Wait for an already-entered old storage operation to finish.
+        val created = createSupabaseClient(config.url, config.clientKey) {
+            httpEngine = engineFactory()
+            defaultLogLevel = LogLevel.NONE
+            install(Auth) {
+                flowType = FlowType.PKCE
+                scheme = "ph.edu.bsit.tcc.ojtdtr"
+                host = "auth"
+                sessionManager = storageFence.sessions(owner, sessions, beforeSessionDelete)
+                codeVerifierCache = storageFence.pkce(owner, pkce, beforeVerifierSave)
+                autoLoadFromStorage = false
+                autoSaveToStorage = true
+                alwaysAutoRefresh = false
+            }
+            install(Postgrest)
+        }
+        client = created
+        onClientCreated(created)
+        created.auth.awaitInitialization()
+        sessionObserver = scope.launch {
+            var acceptedSession = false
+            created.auth.sessionStatus.collect { status ->
+                if (client !== created) return@collect
+                when (status) {
+                    is SessionStatus.Authenticated -> {
+                        acceptedSession = true
+                        val authorized = authorizedSession
+                        if (authorized != null && (authorized.user?.id != status.session.user?.id ||
+                            authorized.accessToken != status.session.accessToken)) logout()
+                    }
+                    is SessionStatus.NotAuthenticated, is SessionStatus.RefreshFailure -> {
+                        if (acceptedSession) logout() // Withdraw authority now; fence/clear and replace the client.
+                    }
+                    else -> Unit
+                }
+            }
+        }
+    }
+
     private fun publish(generation: Long, value: AccountState) {
         if (epoch.isCurrent(generation)) mutableState.value = value
     }
@@ -120,26 +155,35 @@ class AuthCoordinator internal constructor(context: Context,
         operation = scope.launch {
             initialized.await()
             operationMutex.withLock {
+                var transaction: String? = null
                 try {
                     val auth = client?.auth ?: throw IllegalStateException()
                     sessions.allowWrites()
-                    val transaction = pkce.begin()
+                    val ownedTransaction = pkce.begin()
+                    transaction = ownedTransaction
                     val url = auth.getOAuthUrl(Google, redirectUrl = CallbackPolicy.URI_VALUE) {
                         queryParams["prompt"] = "select_account"
                     }
                     val challenge = URI(url).rawQuery.split('&').map { it.split('=', limit = 2) }
                         .single { it[0] == "code_challenge" }[1].let { URLDecoder.decode(it, "UTF-8") }
-                    pkce.bindChallenge(transaction, challenge)
-                    pkce.awaitReady(transaction)
+                    pkce.bindChallenge(ownedTransaction, challenge)
+                    pkce.awaitReady(ownedTransaction)
                     coroutineContext.ensureActive()
                     if (!epoch.isCurrent(generation)) return@withLock
                     phase = OAuthPhase.Waiting
                     openCustomTab(url) // URL is never retained in UI state or navigation.
                     startExpiry(generation)
-                } catch (cancelled: CancellationException) { throw cancelled }
-                catch (_: Exception) {
-                    val cleared = discardTransaction()
-                    phase = OAuthPhase.Idle
+                } catch (_: TimeoutCancellationException) {
+                    // Setup readiness timing out is a failed attempt, not cancellation of this job.
+                    val cleared = withContext(NonCancellable) { transaction?.let { discardTransaction(it) } ?: true }
+                    if (epoch.isCurrent(generation)) phase = OAuthPhase.Idle
+                    publish(generation, AccountState.AccessUnavailable(if (cleared) Failure.OAuth else Failure.SecureStorage, retryable = cleared))
+                } catch (cancelled: CancellationException) {
+                    withContext(NonCancellable) { transaction?.let { discardTransaction(it) } ?: true }
+                    throw cancelled
+                } catch (_: Exception) {
+                    val cleared = transaction?.let { discardTransaction(it) } ?: true
+                    if (epoch.isCurrent(generation)) phase = OAuthPhase.Idle
                     publish(generation, AccountState.AccessUnavailable(if (cleared) Failure.OAuth else Failure.SecureStorage))
                 }
             }
@@ -216,11 +260,15 @@ class AuthCoordinator internal constructor(context: Context,
     }
 
     private suspend fun resolveProfile(generation: Long) {
+        authorizedSession = null
         publish(generation, AccountState.LoadingProfile)
-        val auth = client!!.auth
+        val resolvingClient = client ?: return
+        val auth = resolvingClient.auth
+        var identity = auth.currentSessionOrNull()
         val user = try {
             val session = auth.currentSessionOrNull() ?: throw IllegalStateException()
             if (session.expiresAt <= Clock.System.now() + 60.seconds) auth.refreshCurrentSession()
+            identity = auth.currentSessionOrNull() ?: throw IllegalStateException()
             val validated = auth.retrieveUserForCurrentSession(updateSession = false)
             check(validated.id.isNotBlank() && validated.id == auth.currentUserOrNull()?.id)
             validated
@@ -228,7 +276,7 @@ class AuthCoordinator internal constructor(context: Context,
         catch (_: SecureStorageFailure) { publish(generation, AccountState.AccessUnavailable(Failure.SecureStorage)); return }
         catch (_: Exception) { publish(generation, AccountState.AccessUnavailable(Failure.Session, retryable = true)); return }
         val response = try {
-            client!!.from("profiles").select(columns = Columns.list("id", "role", "status")) {
+            resolvingClient.from("profiles").select(columns = Columns.list("id", "role", "status")) {
                 filter { eq("id", user.id) }
             }
         } catch (cancelled: CancellationException) { throw cancelled }
@@ -236,6 +284,14 @@ class AuthCoordinator internal constructor(context: Context,
         val rows = try { response.decodeList<TrustedProfile>() }
         catch (_: Exception) { publish(generation, AccountState.AccessUnavailable(Failure.ProfileInvalid)); return }
         coroutineContext.ensureActive()
+        val current = auth.currentSessionOrNull()
+        if (client !== resolvingClient || current == null || current.user?.id != user.id ||
+            current.accessToken != identity?.accessToken || auth.sessionStatus.value !is SessionStatus.Authenticated) {
+            publish(generation, AccountState.AccessUnavailable(Failure.Session, retryable = true))
+            return
+        }
+        if (!epoch.isCurrent(generation)) return
+        authorizedSession = current
         publish(generation, ProfilePolicy.map(user.id, user.identities?.any { it.provider == "google" && it.userId == user.id } == true, rows))
     }
 
@@ -246,7 +302,8 @@ class AuthCoordinator internal constructor(context: Context,
                 delay(60_000)
                 operationMutex.withLock {
                     if (!epoch.isCurrent(generation)) return@withLock
-                    val session = client?.auth?.currentSessionOrNull() ?: return@withLock
+                    val session = client?.auth?.currentSessionOrNull()
+                    if (session == null) { logout(); return@withLock }
                     if (session.expiresAt <= Clock.System.now() + 120.seconds) resolveProfile(generation)
                 }
             }
@@ -271,14 +328,17 @@ class AuthCoordinator internal constructor(context: Context,
         }
     }
 
-    private suspend fun discardTransaction(): Boolean = try {
-        pkce.deleteCodeVerifier(); true
+    private suspend fun discardTransaction(id: String? = null): Boolean = try {
+        if (id == null) pkce.deleteCodeVerifier() else pkce.discard(id)
+        true
     } catch (cancelled: CancellationException) { throw cancelled }
     catch (_: Exception) { false }
 
     internal suspend fun close() {
         scope.cancel()
         operation?.join(); refresh?.join(); expiry?.join()
+        sessionObserver?.cancel()
+        storageFence.retire()
         client?.close()
     }
 
@@ -286,27 +346,26 @@ class AuthCoordinator internal constructor(context: Context,
         val generation = epoch.advance() // Immediately revoke all in-memory authorization.
         operation?.cancel(); refresh?.cancel(); expiry?.cancel()
         phase = OAuthPhase.Idle
+        sessionObserver?.cancel()
+        authorizedSession = null
         mutableState.value = AccountState.RestoringSession
         operation = scope.launch {
             initialized.await()
             try {
+                storageFence.retire() // All old SDK writes/deletes are now inert, including delayed cleanup.
                 // Clear/fence before waiting for any cancelled request to release the SDK mutation lock.
                 var storageFailed = false
                 try { sessions.blockAndClear() } catch (_: Exception) { storageFailed = true }
                 try { pkce.deleteCodeVerifier() } catch (_: Exception) { storageFailed = true }
                 operationMutex.withLock {
-                    val auth = client?.auth
-                    try { withTimeoutOrNull(5_000) { auth?.signOut(SignOutScope.LOCAL) } }
-                    catch (_: Exception) { /* Remote revocation can fail; native material still MUST be cleared. */ }
+                    val previous = client
+                    client = null
+                    try { withTimeoutOrNull(5_000) { previous?.auth?.signOut(SignOutScope.LOCAL) } }
+                    catch (_: Exception) { /* Native storage has already been cleared even if revocation fails. */ }
                     finally {
-                        try { auth?.clearSession() }
-                        catch (_: Exception) {
-                            // If SDK cleanup is interrupted by filesystem failure, drop the closed client too.
-                            storageFailed = true
-                            client?.close()
-                            client = null
-                        }
+                        previous?.close() // Cancel its SDK scope; lease fences non-cancellable old work.
                     }
+                    if (epoch.isCurrent(generation)) createClient()
                 }
                 publish(generation, if (storageFailed) AccountState.AccessUnavailable(Failure.SecureStorage) else AccountState.SignedOut)
             } catch (cancelled: CancellationException) { throw cancelled }

@@ -21,12 +21,12 @@ class SecurePkceCache(private val storage: EncryptedAuthStorage, private val now
     private val lock = Any()
     private val json = Json
     @Volatile private var verifierSaveFailed = false
-    private fun read(): OAuthTransaction? {
+    private fun read(enforceExpiry: Boolean = true): OAuthTransaction? {
         val bytes = storage.read("pkce") ?: return null
         val transaction = try { json.decodeFromString<OAuthTransaction>(bytes.toString(Charsets.UTF_8)) }
         catch (_: Exception) { storage.delete("pkce"); throw SecureStorageFailure() }
         finally { bytes.fill(0) }
-        if (!CallbackPolicy.fresh(transaction.createdAt, now())) { storage.delete("pkce"); return null }
+        if (enforceExpiry && !CallbackPolicy.fresh(transaction.createdAt, now())) { storage.delete("pkce"); return null }
         return transaction
     }
     private fun write(transaction: OAuthTransaction) = storage.write("pkce", json.encodeToString(transaction).toByteArray(Charsets.UTF_8))
@@ -71,6 +71,10 @@ class SecurePkceCache(private val storage: EncryptedAuthStorage, private val now
             delay(10)
         }
     }
+    // Compare and delete atomically: stale setup cleanup must not remove a replacement transaction.
+    suspend fun discard(id: String) = withContext(Dispatchers.IO) { synchronized(lock) {
+        if (read(enforceExpiry = false)?.id == id) storage.delete("pkce")
+    } }
     suspend fun hasPending(): Boolean = withContext(Dispatchers.IO) { synchronized(lock) {
         val tx = read() ?: return@synchronized false
         // A process interrupted during exchange cannot safely repeat it.

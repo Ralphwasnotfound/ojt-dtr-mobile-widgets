@@ -114,4 +114,18 @@ class SecureAuthenticationTest {
         cache.saveCodeVerifier(old); assertFalse(cache.claim())
         cache.saveCodeVerifier(replacement); assertTrue(cache.claim()); assertEquals(replacement, cache.loadCodeVerifier())
     }
+    @Test fun staleOwnedCleanupCannotDeleteReplacementPkce() = runBlocking {
+        val cache = SecurePkceCache(storage)
+        val first = cache.begin()
+        val replacement = cache.begin()
+        val verifier = "synthetic-owned-verifier-" + "f".repeat(48)
+        cache.bindChallenge(replacement, challenge(verifier))
+        cache.saveCodeVerifier(verifier)
+        cache.discard(first)
+        cache.awaitReady(replacement)
+        assertTrue(cache.claim()); assertEquals(verifier, cache.loadCodeVerifier())
+        cache.discard(replacement)
+        assertFalse(disk("pkce").exists()); assertFalse(cache.claim())
+    }
+
 }

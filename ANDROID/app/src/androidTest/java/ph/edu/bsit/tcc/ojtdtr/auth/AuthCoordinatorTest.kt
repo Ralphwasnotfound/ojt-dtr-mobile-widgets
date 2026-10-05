@@ -5,6 +5,8 @@ package ph.edu.bsit.tcc.ojtdtr.auth
 import android.content.Context
 import android.content.ContextWrapper
 import androidx.test.platform.app.InstrumentationRegistry
+import io.github.jan.supabase.SupabaseClient
+import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.user.Identity
 import io.github.jan.supabase.auth.user.UserInfo
 import io.github.jan.supabase.auth.user.UserSession
@@ -16,11 +18,13 @@ import java.io.File
 import java.security.KeyStore
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -60,7 +64,7 @@ class AuthCoordinatorTest {
         root.deleteRecursively()
         KeyStore.getInstance("AndroidKeyStore").apply { load(null); deleteEntry(alias) }
     }
-    private fun coordinator(engine: MockEngine) = AuthCoordinator(context, config, engine, alias).also { owners += it }
+    private fun coordinator(engine: MockEngine) = AuthCoordinator(context, config, { MockEngine(engine.config) }, alias).also { owners += it }
     private suspend fun await(owner: AuthCoordinator, expected: AccountState) = withTimeout(15_000) {
         owner.state.first { it == expected }
     }
@@ -188,4 +192,96 @@ class AuthCoordinatorTest {
         owner.cancelAuthentication(); await(owner, AccountState.SignedOut)
         assertNull(storage.read("pkce")); assertNull(storage.read("session"))
     }
+    @Test fun setupTimeoutRemovesOwnedTransactionAndExitsAuthenticating() = runBlocking<Unit> {
+        val release = CompletableDeferred<Unit>()
+        val tokens = AtomicInteger()
+        val fake = engine(profile(), tokens = tokens)
+        val owner = AuthCoordinator(context, config, { MockEngine(fake.config) }, alias,
+            beforeVerifierSave = { release.await() }).also { owners += it }
+        await(owner, AccountState.SignedOut)
+        var browserOpened = false
+        owner.signIn { browserOpened = true }
+        await(owner, AccountState.AccessUnavailable(Failure.OAuth, retryable = true))
+        assertFalse(browserOpened)
+        assertNull(storage.read("pkce")); assertNull(storage.read("session"))
+        release.complete(Unit) // Late SDK save cannot resurrect the timed-out transaction.
+        owner.callback("${CallbackPolicy.URI_VALUE}?code=synthetic-late-timeout")
+        delay(100)
+        assertNull(storage.read("pkce")); assertEquals(0, tokens.get())
+        assertNotEquals(AccountState.Authenticating, owner.state.value)
+        owner.retry(); await(owner, AccountState.SignedOut)
+    }
+
+    @Test fun oldSdkInvalidationCannotClearReplacementAndCurrentInvalidationWithdrawsApproval() = runBlocking<Unit> {
+        SecureSessionManager(storage).saveSession(session())
+        val clients = mutableListOf<SupabaseClient>()
+        val invalidUser = AtomicBoolean(false)
+        val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>()
+        val deletes = AtomicInteger()
+        val replacementUser = user.copy(id = "00000000-0000-4000-8000-000000000002")
+        val replacement = session().copy(user = replacementUser, accessToken = "synthetic-replacement-access",
+            refreshToken = "synthetic-replacement-refresh")
+        val owner = AuthCoordinator(context, config, {
+            MockEngine { request ->
+                val jsonHeaders = headersOf("Content-Type", "application/json")
+                when {
+                    request.url.encodedPath.endsWith("/user") && invalidUser.get() ->
+                        respond("{\"error_code\":\"session_not_found\",\"msg\":\"synthetic missing session\"}", HttpStatusCode.Unauthorized, jsonHeaders)
+                    request.url.encodedPath.endsWith("/user") -> respond(Json.encodeToString(
+                        if (clients.size == 1) user else replacementUser), HttpStatusCode.OK, jsonHeaders)
+                    request.url.encodedPath.endsWith("/token") -> respond(Json.encodeToString(replacement), HttpStatusCode.OK, jsonHeaders)
+                    request.url.encodedPath.endsWith("/profiles") -> respond(
+                        if (clients.size == 1) profile() else "[{\"id\":\"${replacementUser.id}\",\"role\":\"admin\",\"status\":\"approved\"}]", HttpStatusCode.OK, jsonHeaders)
+                    request.url.encodedPath.endsWith("/logout") -> respond("", HttpStatusCode.NoContent)
+                    else -> error("Unexpected synthetic endpoint")
+                }
+            }
+        }, alias, beforeSessionDelete = {
+            if (deletes.incrementAndGet() == 1) withContext(NonCancellable) {
+                entered.complete(Unit); release.await()
+            }
+        }, onClientCreated = { clients += it }).also { owners += it }
+        await(owner, AccountState.StudentApproved)
+        val old = clients.single()
+        invalidUser.set(true)
+        assertTrue(runCatching { old.auth.retrieveUserForCurrentSession(updateSession = false) }.isFailure)
+        withTimeout(5_000) { entered.await() } // Real SDK session_not_found background cleanup is delayed.
+        owner.logout(); await(owner, AccountState.SignedOut)
+        invalidUser.set(false)
+        val launched = CompletableDeferred<Unit>()
+        owner.signIn { launched.complete(Unit) }; withTimeout(10_000) { launched.await() }
+        owner.callback("${CallbackPolicy.URI_VALUE}?code=synthetic-replacement-code")
+        await(owner, AccountState.AdminApproved)
+        release.complete(Unit)
+        withTimeout(5_000) { old.auth.sessionStatus.first { it is io.github.jan.supabase.auth.status.SessionStatus.NotAuthenticated } }
+        delay(100)
+        assertEquals(AccountState.AdminApproved, owner.state.value)
+        assertEquals(replacementUser.id, clients.last().auth.currentUserOrNull()?.id)
+        assertEquals(replacement.accessToken, SecureSessionManager(storage).loadSession()?.accessToken)
+        // Stale SDK persistence is fenced in both directions, not just deletes.
+        old.auth.importSession(session(), autoRefresh = false)
+        assertEquals(AccountState.AdminApproved, owner.state.value)
+        old.auth.sessionManager.saveSession(session())
+        assertEquals(replacement.accessToken, SecureSessionManager(storage).loadSession()?.accessToken)
+        clients.last().auth.clearSession()
+        await(owner, AccountState.SignedOut)
+        assertNull(storage.read("session")); assertNull(storage.read("pkce"))
+        assertNotEquals(AccountState.AdminApproved, owner.state.value)
+    }
+
+    @Test fun sessionDisappearingDuringProfileReadCannotPublishApproval() = runBlocking<Unit> {
+        SecureSessionManager(storage).saveSession(session())
+        val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>()
+        val fake = engine(profile(), entered = entered, release = release)
+        lateinit var sdk: SupabaseClient
+        val owner = AuthCoordinator(context, config, { MockEngine(fake.config) }, alias,
+            onClientCreated = { sdk = it }).also { owners += it }
+        withTimeout(10_000) { entered.await() }
+        sdk.auth.clearSession()
+        assertNotEquals(AccountState.StudentApproved, owner.state.value)
+        release.complete(Unit)
+        await(owner, AccountState.SignedOut)
+        assertNull(storage.read("session"))
+    }
+
 }

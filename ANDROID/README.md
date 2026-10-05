@@ -52,7 +52,7 @@ or embedded Google secret is not introduced.
 
 ## Authentication design
 
-`DtrApplication` owns one `AuthCoordinator`, with one Supabase client installing
+`DtrApplication` owns one `AuthCoordinator`, with one active Supabase client installing
 only Auth and PostgREST. PKCE is explicit. SDK settings persistence and debug
 logging are disabled/replaced. Native sessions stay independent of web/browser
 sessions. A Custom Tab is opened only after the SDK's verifier has been persisted
@@ -98,8 +98,14 @@ refresh and retry also revalidate authorization. No worker is scheduled. Restart
 always revalidates against the server. Epoch guards prevent old profile results
 from authorizing after logout or session replacement. Logout immediately clears
 UI authority, fences/deletes session persistence, cancels pending requests and
-PKCE, attempts a bounded native LOCAL sign-out, and clears the SDK session even
-if remote revocation fails. It does not log out the browser/web session.
+PKCE, attempts a bounded native LOCAL sign-out, and retires/closes the SDK client
+even if remote revocation fails. Each replacement client has a new storage lease;
+retired SDK background jobs cannot save or delete the replacement session/PKCE.
+The pinned SDK session-status flow withdraws authorization on current-session
+removal or refresh failure. Before publishing profile authorization, the
+coordinator checks the current client, user ID and session token identity again.
+OAuth setup readiness timeout is a retryable failure: attempt-owned PKCE cleanup
+runs without swallowing intentional coroutine cancellation. It does not log out the browser/web session.
 
 Registration remains the existing web flow's responsibility. The native UI only
 explains RegistrationRequired; it does not write profiles or call registration /
@@ -136,5 +142,9 @@ app-defined exported component; it now handles the narrow OAuth callback as well
 as launcher entry. Library permission-guarded services retain their U7.4 policy.
 
 Read `security/README.md` under the application package for limitations and
-`docs/U7.5B-verification.md` for the final verification record. The workspace is
-not a usable Git repository; none was initialized, committed or pushed.
+`docs/U7.5B-verification.md` for the original verification record and
+`docs/U7.5B.1-verification.md` for the blocking review corrections. The mobile
+monorepo checkpoint remains unchanged; U7.5B.1 changes await another review gate.
+The adjustable wall-clock transaction-age finding and custom URI scheme handler
+ownership limitation remain documented and deferred; no App Links or transaction
+timing redesign is included.
