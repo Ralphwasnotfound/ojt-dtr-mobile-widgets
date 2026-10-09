@@ -49,7 +49,7 @@ internal object ProofContract {
     }
     fun receipt(raw: String, uid: String, action: AttendanceAction, ticket: PreparedProof, fix: Fix, query: Boolean = false): ProofReceipt? {
         val parsed = Json.parseToJsonElement(raw)
-        val row = if (query) (parsed as JsonArray).let { require(it.size <= 1); it.firstOrNull() as? JsonObject ?: return null }
+        val row = if (query) (parsed as JsonArray).let { require(it.size <= 1); if (it.isEmpty()) return null; it.single() as JsonObject }
             else parsed as JsonObject
         require(row.text("student_uid") == uid && row.text("upload_id") == ticket.uploadId &&
             row.text("attendance_session_id") == ticket.sessionId && row.text("photo_path") == ticket.path &&
@@ -118,7 +118,8 @@ internal class AttendanceSubmission(
             catch (cancelled: CancellationException) {
                 if (!closed && current()) mutable.value = if(mutable.value == SubmissionState.Completed) SubmissionState.Completed else if(sent) SubmissionState.OutcomeUnknown else SubmissionState.Cancelled
                 throw cancelled
-            } catch (failure: SubmissionFailure) { failure(failure.problem) }
+            } catch (error: ProofTransportFailure) { failure(error.submissionProblem()) }
+            catch (failure: SubmissionFailure) { failure(failure.problem) }
             catch (_: Exception) { failure(SubmissionProblem.Unavailable) }
             finally { proof.bytes.fill(0) }
         }
@@ -149,6 +150,7 @@ internal class AttendanceSubmission(
                 // Empty receipt can mean an in-flight transaction; never automatically finalize or replace.
             } catch (_: TimeoutCancellationException) { failure(SubmissionProblem.Network) }
             catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: ProofTransportFailure) { failure(error.submissionProblem()) }
             catch (_: Exception) { failure(SubmissionProblem.Unavailable) }
         }
     }
