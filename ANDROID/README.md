@@ -1,9 +1,9 @@
 # BSIT-TCC OJT DTR — Android Companion
 
-U7.5C builds a focused authenticated companion shell on the U7.5B/B.1 native
-authentication foundation within the U7.4 Kotlin / Compose architecture. Permanent application ID and namespace:
-`ph.edu.bsit.tcc.ojtdtr`. No attendance/activity writes, registration RPCs,
-full dashboards, widgets or workers are implemented. U7.5C remains uncommitted for review.
+U7.5D.1 adds validated, read-only Supabase attendance to the authenticated companion.
+The existing U7.5B/B.1/C authentication boundary remains in place. No attendance
+mutations, proof capture, widgets or workers are implemented. Changes await review;
+see `docs/U7.5D.1-verification.md` for the contract and verification limits.
 
 ## Toolchain and dependencies
 
@@ -162,7 +162,7 @@ Read `security/README.md` under the application package for limitations and
 `docs/U7.5B-verification.md` for the original verification record and
 `docs/U7.5B.1-verification.md` for the blocking review corrections, and
 `docs/U7.5C-verification.md` for companion behavior and the recommended future
-widget boundary. The committed baseline is U7.5B.1; U7.5C changes await review.
+widget boundary. The committed baseline is U7.5C (`96460d1`); U7.5D.1 changes await review.
 The adjustable wall-clock transaction-age finding and custom URI scheme handler
 ownership limitation remain documented and deferred; no App Links or transaction
 timing redesign is included.

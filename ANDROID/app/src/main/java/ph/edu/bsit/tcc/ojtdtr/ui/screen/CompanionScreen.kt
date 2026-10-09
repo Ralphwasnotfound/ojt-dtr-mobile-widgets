@@ -15,6 +15,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import ph.edu.bsit.tcc.ojtdtr.attendance.AttendanceState
 import ph.edu.bsit.tcc.ojtdtr.R
 import ph.edu.bsit.tcc.ojtdtr.auth.AccountState
 import ph.edu.bsit.tcc.ojtdtr.auth.StudentIdentity
@@ -24,6 +25,7 @@ import ph.edu.bsit.tcc.ojtdtr.navigation.WebDestination
 @Composable
 fun CompanionScreen(account: AccountState, identity: StudentIdentity?, configured: Boolean,
     onGoogle: () -> Unit, onCancel: () -> Unit, onRetry: () -> Unit, onSignOut: () -> Unit,
+    attendance: AttendanceState = AttendanceState.AccountChanged, onAttendanceRefresh: () -> Unit = {},
     onRefresh: () -> Unit, onWeb: (WebDestination) -> Unit, onFoundation: () -> Unit) {
     Surface(Modifier.fillMaxSize()) {
         Column(Modifier.safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp),
@@ -39,7 +41,7 @@ fun CompanionScreen(account: AccountState, identity: StudentIdentity?, configure
                     if (identity?.fullName == null && identity?.studentId == null)
                         Text(stringResource(R.string.identity_unavailable))
                     Text(stringResource(R.string.today_dtr), style = MaterialTheme.typography.titleMedium)
-                    Text(stringResource(R.string.dtr_not_connected))
+                    AttendanceSection(attendance, onAttendanceRefresh)
                 }
                 AccountState.AdminApproved -> {
                     Text(stringResource(R.string.admin_companion), style = MaterialTheme.typography.headlineSmall)

@@ -326,4 +326,86 @@ class AuthCoordinatorTest {
         assertNull(storage.read("session")); assertNull(owner.studentIdentity.value)
     }
 
+    /** Actual coordinator + SDK transport coverage; synthetic host only. */
+    @Test fun attendanceUsesOwnedSessionAndDenialStopsBeforeRpc() = runBlocking<Unit> {
+        SecureSessionManager(storage).saveSession(session())
+        val account = AtomicReference("approved")
+        val queries = AtomicInteger()
+        val profileQuery = AtomicReference("")
+        val clientCount = AtomicInteger()
+        val mock = MockEngine { request ->
+            val body = when {
+                request.url.encodedPath.endsWith("/user") -> Json.encodeToString(user)
+                request.url.encodedPath.endsWith("/profiles") -> {
+                    profileQuery.set(request.url.encodedQuery)
+                    "[{\"id\":\"$userId\",\"role\":\"student\",\"status\":\"${account.get()}\",\"required_hours\":486}]"
+                }
+                request.url.encodedPath.endsWith("/rpc/attendance_summary") -> {
+                    queries.incrementAndGet()
+                    "[{\"open_session_id\":null,\"open_time_in\":null,\"open_session_ordinal\":null," +
+                        "\"started_today\":false,\"starts_today\":0,\"next_action\":\"time_in\",\"today_sessions\":[]," +
+                        "\"completed_seconds\":0,\"today_completed_seconds\":0,\"completed_sessions\":0,\"days_present\":0," +
+                        "\"manila_day\":\"${java.time.LocalDate.now(ph.edu.bsit.tcc.ojtdtr.attendance.Manila)}\"}]"
+                }
+                else -> error("Unexpected synthetic attendance endpoint")
+            }
+            respond(body, HttpStatusCode.OK, headersOf("Content-Type", "application/json"))
+        }
+        val owner = AuthCoordinator(context, config, { MockEngine(mock.config) }, alias,
+            onClientCreated = { clientCount.incrementAndGet() }).also { owners += it }
+        await(owner, AccountState.StudentApproved)
+        withContext(kotlinx.coroutines.Dispatchers.Main) { owner.refreshAttendance() }
+        withTimeout(10_000) { owner.attendance.state.first { it is ph.edu.bsit.tcc.ojtdtr.attendance.AttendanceState.Fresh } }
+        assertEquals(1, queries.get()); assertEquals(1, clientCount.get())
+        assertTrue(profileQuery.get().contains("id=eq.$userId"))
+        assertTrue(profileQuery.get().contains("required_hours"))
+        account.set("rejected")
+        withContext(kotlinx.coroutines.Dispatchers.Main) { owner.refreshAttendance() }
+        withTimeout(10_000) { owner.attendance.state.first { it == ph.edu.bsit.tcc.ojtdtr.attendance.AttendanceState.AccessDenied } }
+        assertEquals(1, queries.get()) // Known revoked profile never falls through to attendance.
+    }
+
+    @Test fun attendanceLogoutRejectsNonCooperativeSdkResponse() = runBlocking<Unit> {
+        SecureSessionManager(storage).saveSession(session())
+        val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>()
+        val responseCompleted = CompletableDeferred<Unit>()
+        val day = java.time.LocalDate.now(ph.edu.bsit.tcc.ojtdtr.attendance.Manila)
+        val fixture = """[{"open_session_id":null,"open_time_in":null,"open_session_ordinal":null,
+            "started_today":true,"starts_today":1,"next_action":"time_in","today_sessions":[{
+            "id":"22222222-2222-4222-8222-222222222222","student_uid":"$userId",
+            "time_in":"${day}T00:00:00Z","time_out":"${day}T00:45:00.250Z","start_day":"$day","session_ordinal":1}],
+            "completed_seconds":9000.25,"today_completed_seconds":2700.25,"completed_sessions":3,"days_present":2,"manila_day":"$day"}]"""
+        val ownProfile = profile().replace("}]", ",\"required_hours\":486}]")
+        assertEquals(java.math.BigDecimal("2700.25"),
+            ph.edu.bsit.tcc.ojtdtr.attendance.AttendanceContract.parse(fixture, ownProfile, userId).todayCompletedSeconds)
+        val mock = MockEngine { request ->
+            when {
+                request.url.encodedPath.endsWith("/user") -> respond(Json.encodeToString(user), HttpStatusCode.OK, headersOf("Content-Type", "application/json"))
+                request.url.encodedPath.endsWith("/profiles") -> respond(profile().replace("}]", ",\"required_hours\":486}]"), HttpStatusCode.OK, headersOf("Content-Type", "application/json"))
+                request.url.encodedPath.endsWith("/rpc/attendance_summary") -> {
+                    entered.complete(Unit)
+                    withContext(NonCancellable) { release.await() }
+                    respond(fixture, HttpStatusCode.OK, headersOf("Content-Type", "application/json")).also {
+                        responseCompleted.complete(Unit)
+                    }
+                }
+                request.url.encodedPath.endsWith("/logout") -> respond("", HttpStatusCode.NoContent)
+                else -> error("Unexpected synthetic attendance endpoint")
+            }
+        }
+        val owner = coordinator(mock)
+        await(owner, AccountState.StudentApproved)
+        withContext(kotlinx.coroutines.Dispatchers.Main) { owner.refreshAttendance() }
+        withTimeout(10_000) { entered.await() }
+        withContext(kotlinx.coroutines.Dispatchers.Main) { owner.logout() }
+        assertEquals(ph.edu.bsit.tcc.ojtdtr.attendance.AttendanceState.AccountChanged, owner.attendance.state.value)
+        release.complete(Unit)
+        withTimeout(10_000) {
+            responseCompleted.await() // The delayed mock response was actually returned.
+            owner.awaitAttendanceIdle() // The whole coordinator request exited, not just logout.
+        }
+        await(owner, AccountState.SignedOut)
+        assertEquals(ph.edu.bsit.tcc.ojtdtr.attendance.AttendanceState.AccountChanged, owner.attendance.state.value)
+    }
+
 }

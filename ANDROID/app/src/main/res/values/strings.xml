@@ -37,7 +37,6 @@ App data is excluded from Android backup and device transfer. Network communicat
     <string name="student_identity">Student ID: %1$s</string>
     <string name="identity_unavailable">Student identity details are unavailable.</string>
     <string name="today_dtr">Today’s DTR</string>
-    <string name="dtr_not_connected">Not yet connected. Attendance data and actions will be available in a later phase.</string>
     <string name="admin_web_only">Full administration is available in the web system.</string>
     <string name="pending_explanation">Your registration exists and is waiting for administrator approval. Refresh your account status to check for updates.</string>
     <string name="rejected_explanation">Your registration was rejected. Native access is unavailable. Contact your administrator for assistance.</string>

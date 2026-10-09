@@ -13,8 +13,12 @@ import io.github.jan.supabase.auth.SignOutScope
 import io.github.jan.supabase.auth.status.SessionStatus
 import io.github.jan.supabase.auth.user.UserSession
 import io.github.jan.supabase.createSupabaseClient
+import io.github.jan.supabase.exceptions.RestException
 import io.github.jan.supabase.logging.LogLevel
 import io.github.jan.supabase.postgrest.Postgrest
+import io.github.jan.supabase.postgrest.postgrest
+import io.github.jan.supabase.postgrest.exception.PostgrestRestException
+import ph.edu.bsit.tcc.ojtdtr.attendance.*
 import io.github.jan.supabase.postgrest.from
 import io.github.jan.supabase.postgrest.query.Columns
 import java.net.URI
@@ -73,6 +77,62 @@ class AuthCoordinator internal constructor(context: Context,
     private var expiry: Job? = null
     private enum class OAuthPhase { Idle, Waiting, Exchanging }
     private var phase = OAuthPhase.Idle
+    private class AttendanceBinding(val generation: Long, val client: SupabaseClient, val session: UserSession)
+    private var attendanceBinding: AttendanceBinding? = null
+    val attendance = AttendanceRepository(read = ::readAttendance,
+        isCurrent = { it is AttendanceBinding && currentAttendance(it) })
+    private var attendanceRequest: Job? = null
+
+    private fun clearAttendance() {
+        attendanceBinding = null
+        attendanceRequest?.cancel()
+        attendance.clear()
+    }
+
+    fun refreshAttendance() {
+        if (mutableState.value != AccountState.StudentApproved) return
+        attendanceRequest?.cancel()
+        attendanceRequest = scope.launch { attendance.refresh() }
+    }
+
+    /** Completion barrier for lifecycle verification; exposes no client, session or result. */
+    internal suspend fun awaitAttendanceIdle() { attendanceRequest?.join() }
+
+    private fun currentAttendance(owner: AttendanceBinding): Boolean {
+        val current = owner.client.auth.currentSessionOrNull()
+        return attendanceBinding === owner && client === owner.client && epoch.isCurrent(owner.generation) &&
+            mutableState.value == AccountState.StudentApproved && authorizedSession === owner.session &&
+            current != null && current.user?.id == owner.session.user?.id &&
+            current.accessToken == owner.session.accessToken && current.expiresAt > Clock.System.now() &&
+            owner.client.auth.sessionStatus.value is SessionStatus.Authenticated
+    }
+
+    private suspend fun readAttendance(ticket: Any): AttendanceSummary {
+        val owner = ticket as? AttendanceBinding ?: throw AttendanceReadFailure(AttendanceProblem.AccessDenied)
+        fun checkOwner() {
+            if (!currentAttendance(owner)) throw AttendanceReadFailure(AttendanceProblem.AccessDenied)
+        }
+        checkOwner()
+        try {
+            val uid = owner.session.user?.id ?: throw AttendanceReadFailure(AttendanceProblem.AccessDenied)
+            val profile = owner.client.from("profiles").select(columns = Columns.list("id", "role", "status", "required_hours")) {
+                filter { eq("id", uid) }
+            }.data
+            checkOwner()
+            AttendanceContract.requiredHours(profile, uid) // Denial must not fall back to cached attendance.
+            val summary = owner.client.postgrest.rpc("attendance_summary").data
+            checkOwner()
+            return AttendanceContract.parse(summary, profile, uid)
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: PostgrestRestException) {
+            checkOwner()
+            throw AttendanceReadFailure(attendanceProblem(error.code, error.statusCode))
+        } catch (error: RestException) {
+            checkOwner()
+            throw AttendanceReadFailure(attendanceProblem(null, error.statusCode))
+        } catch (error: AttendanceReadFailure) { throw error }
+        catch (_: Exception) { checkOwner(); throw AttendanceReadFailure(AttendanceProblem.Network) }
+    }
 
     init {
         operation = scope.launch {
@@ -148,14 +208,27 @@ class AuthCoordinator internal constructor(context: Context,
 
     private fun publish(generation: Long, value: AccountState) {
         if (epoch.isCurrent(generation)) {
-            if (value != AccountState.StudentApproved) mutableIdentity.value = null
+            if (value != AccountState.StudentApproved) {
+                mutableIdentity.value = null
+                clearAttendance()
+            }
             mutableState.value = value
+            if (value == AccountState.StudentApproved) {
+                val accepted = authorizedSession
+                val active = client
+                if (accepted != null && active != null) {
+                    val owner = AttendanceBinding(generation, active, accepted)
+                    attendanceBinding = owner
+                    attendance.bind(owner)
+                }
+            }
         }
     }
 
     fun signIn(openCustomTab: (String) -> Unit) {
         if (mutableState.value != AccountState.SignedOut || !configured) return
         val generation = epoch.advance()
+        clearAttendance()
         mutableState.value = AccountState.Authenticating
         operation = scope.launch {
             initialized.await()
@@ -255,6 +328,7 @@ class AuthCoordinator internal constructor(context: Context,
         if (client == null) return
         val generation = epoch.advance()
         operation?.cancel(); refresh?.cancel()
+        clearAttendance()
         mutableIdentity.value = null
         mutableState.value = AccountState.RestoringSession
         operation = scope.launch {
@@ -358,6 +432,7 @@ class AuthCoordinator internal constructor(context: Context,
     catch (_: Exception) { false }
 
     internal suspend fun close() {
+        clearAttendance()
         scope.cancel()
         operation?.join(); refresh?.join(); expiry?.join()
         sessionObserver?.cancel()
@@ -371,6 +446,7 @@ class AuthCoordinator internal constructor(context: Context,
         phase = OAuthPhase.Idle
         sessionObserver?.cancel()
         authorizedSession = null
+        clearAttendance()
         mutableIdentity.value = null
         mutableState.value = AccountState.RestoringSession
         operation = scope.launch {
