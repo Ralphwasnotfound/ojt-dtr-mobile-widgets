@@ -7,22 +7,22 @@
     <string name="development_label">Development Build</string>
     <string name="college_name">Torres Capitol College · BSIT Department</string>
     <string name="open_foundation">Foundation / About</string>
-    <string name="foundation_title">Native Foundation</string>
-    <string name="foundation_status">Native authentication foundation. Account access is checked on the Welcome screen.
+    <string name="foundation_title">About this companion</string>
+    <string name="foundation_status">Native authentication foundation. Account access is checked with the server.
 
 App data is excluded from Android backup and device transfer. Network communication requires HTTPS.</string>
-    <string name="back_to_welcome">Back to Welcome</string>
+    <string name="back_to_welcome">Back to companion</string>
     <string name="auth_google">Continue with Google</string>
     <string name="auth_restoring">Restoring native session…</string>
     <string name="auth_signed_out">Sign in to connect your native companion account.</string>
     <string name="auth_authenticating">Waiting for secure Google authentication…</string>
     <string name="auth_loading_profile">Checking account access…</string>
-    <string name="auth_student_approved">Your student account is approved. The native dashboard will be added in a later phase.</string>
-    <string name="auth_admin_approved">Your administrator account is approved. The native dashboard will be added in a later phase.</string>
+    <string name="auth_student_approved">Approved student account.</string>
+    <string name="auth_admin_approved">Approved administrator account.</string>
     <string name="auth_pending">Registration is awaiting administrator approval.</string>
     <string name="auth_rejected">Registration was not approved.</string>
-    <string name="auth_registration_required">Registration must be completed through the existing web registration flow. Native registration is not available yet.</string>
-    <string name="auth_configuration_missing">Native sign-in is not configured. The project URL and client-safe key must be supplied before authentication can be tested.</string>
+    <string name="auth_registration_required">Complete registration through the web system.</string>
+    <string name="auth_configuration_missing">Sign-in is currently unavailable. Contact the application provider.</string>
     <string name="auth_storage_failure">Secure native storage is unavailable. Sign out to clear native authentication material.</string>
     <string name="auth_session_failure">The native session could not be verified. Access remains unavailable. Retry or sign out.</string>
     <string name="auth_profile_failure">Account access could not be checked. Retry or sign out.</string>
@@ -32,4 +32,20 @@ App data is excluded from Android backup and device transfer. Network communicat
     <string name="auth_cancel">Cancel sign-in</string>
     <string name="auth_retry">Retry</string>
     <string name="auth_sign_out">Sign out</string>
+    <string name="student_companion">Student companion</string>
+    <string name="admin_companion">Administrator account</string>
+    <string name="student_identity">Student ID: %1$s</string>
+    <string name="identity_unavailable">Student identity details are unavailable.</string>
+    <string name="today_dtr">Today’s DTR</string>
+    <string name="dtr_not_connected">Not yet connected. Attendance data and actions will be available in a later phase.</string>
+    <string name="admin_web_only">Full administration is available in the web system.</string>
+    <string name="pending_explanation">Your registration exists and is waiting for administrator approval. Refresh your account status to check for updates.</string>
+    <string name="rejected_explanation">Your registration was rejected. Native access is unavailable. Contact your administrator for assistance.</string>
+    <string name="registration_explanation">No registration was found for your verified account. Complete registration in the full web system, then return here and refresh your account status.</string>
+    <string name="open_registration">Open web registration</string>
+    <string name="open_full_system">Open Full DTR System</string>
+    <string name="refresh_account">Refresh account status</string>
+    <string name="browser_independent">The browser has a separate sign-in session. Sign in there with the same Google account. Returning here does not automatically change account access.</string>
+    <string name="companion_about">About this companion</string>
+    <string name="browser_unavailable">No browser is available to open the web system.</string>
 </resources>

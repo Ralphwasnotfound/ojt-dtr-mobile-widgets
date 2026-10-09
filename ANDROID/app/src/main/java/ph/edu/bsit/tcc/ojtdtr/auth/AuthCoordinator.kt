@@ -55,6 +55,8 @@ class AuthCoordinator internal constructor(context: Context,
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val mutableState = MutableStateFlow<AccountState>(AccountState.RestoringSession)
     val state = mutableState.asStateFlow()
+    private val mutableIdentity = MutableStateFlow<StudentIdentity?>(null)
+    val studentIdentity = mutableIdentity.asStateFlow()
     val configured = configuration != null
     private val epoch = AuthorizationEpoch()
     private val operationMutex = Mutex()
@@ -145,7 +147,10 @@ class AuthCoordinator internal constructor(context: Context,
     }
 
     private fun publish(generation: Long, value: AccountState) {
-        if (epoch.isCurrent(generation)) mutableState.value = value
+        if (epoch.isCurrent(generation)) {
+            if (value != AccountState.StudentApproved) mutableIdentity.value = null
+            mutableState.value = value
+        }
     }
 
     fun signIn(openCustomTab: (String) -> Unit) {
@@ -234,11 +239,23 @@ class AuthCoordinator internal constructor(context: Context,
         logout()
     }
 
+    fun refreshProfile() {
+        if (mutableState.value !in listOf(AccountState.StudentApproved, AccountState.AdminApproved,
+                AccountState.Pending, AccountState.Rejected, AccountState.RegistrationRequired)) return
+        recheckProfile()
+    }
+
     fun retry() {
         val current = mutableState.value as? AccountState.AccessUnavailable ?: return
-        if (!current.retryable || client == null) return
+        if (!current.retryable) return
+        recheckProfile()
+    }
+
+    private fun recheckProfile() {
+        if (client == null) return
         val generation = epoch.advance()
         operation?.cancel(); refresh?.cancel()
+        mutableIdentity.value = null
         mutableState.value = AccountState.RestoringSession
         operation = scope.launch {
             initialized.await()
@@ -276,7 +293,7 @@ class AuthCoordinator internal constructor(context: Context,
         catch (_: SecureStorageFailure) { publish(generation, AccountState.AccessUnavailable(Failure.SecureStorage)); return }
         catch (_: Exception) { publish(generation, AccountState.AccessUnavailable(Failure.Session, retryable = true)); return }
         val response = try {
-            resolvingClient.from("profiles").select(columns = Columns.list("id", "role", "status")) {
+            resolvingClient.from("profiles").select(columns = Columns.list("id", "role", "status", "full_name", "student_id")) {
                 filter { eq("id", user.id) }
             }
         } catch (cancelled: CancellationException) { throw cancelled }
@@ -292,7 +309,13 @@ class AuthCoordinator internal constructor(context: Context,
         }
         if (!epoch.isCurrent(generation)) return
         authorizedSession = current
-        publish(generation, ProfilePolicy.map(user.id, user.identities?.any { it.provider == "google" && it.userId == user.id } == true, rows))
+        val account = ProfilePolicy.map(user.id,
+            user.identities?.any { it.provider == "google" && it.userId == user.id } == true, rows)
+        mutableIdentity.value = if (account == AccountState.StudentApproved) rows.single().let {
+            StudentIdentity(it.fullName?.trim()?.takeIf(String::isNotEmpty),
+                it.studentId?.trim()?.takeIf(String::isNotEmpty))
+        } else null
+        publish(generation, account)
     }
 
     private fun startRefresh(generation: Long) {
@@ -348,6 +371,7 @@ class AuthCoordinator internal constructor(context: Context,
         phase = OAuthPhase.Idle
         sessionObserver?.cancel()
         authorizedSession = null
+        mutableIdentity.value = null
         mutableState.value = AccountState.RestoringSession
         operation = scope.launch {
             initialized.await()

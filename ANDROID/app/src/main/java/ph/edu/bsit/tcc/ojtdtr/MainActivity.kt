@@ -2,6 +2,8 @@ package ph.edu.bsit.tcc.ojtdtr
 
 import android.os.Bundle
 import android.content.Intent
+import android.content.ActivityNotFoundException
+import android.widget.Toast
 import androidx.core.net.toUri
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.activity.ComponentActivity
@@ -19,6 +21,12 @@ class MainActivity : ComponentActivity() {
             OjtDtrTheme { CompanionNavigation(
                 authentication = (application as DtrApplication).authentication,
                 onGoogle = { url -> CustomTabsIntent.Builder().build().launchUrl(this, url.toUri()) },
+                onWeb = { url ->
+                    try { startActivity(Intent(Intent.ACTION_VIEW, url.toUri()).addCategory(Intent.CATEGORY_BROWSABLE)) }
+                    catch (_: ActivityNotFoundException) {
+                        Toast.makeText(this, R.string.browser_unavailable, Toast.LENGTH_LONG).show()
+                    }
+                },
             ) }
         }
     }

@@ -19,6 +19,7 @@ import java.security.KeyStore
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -71,7 +72,8 @@ class AuthCoordinatorTest {
     private fun engine(profiles: String, status: HttpStatusCode = HttpStatusCode.OK,
         tokens: AtomicInteger = AtomicInteger(), query: CompletableDeferred<String>? = null,
         entered: CompletableDeferred<Unit>? = null, release: CompletableDeferred<Unit>? = null,
-        logoutStatus: HttpStatusCode = HttpStatusCode.NoContent) = MockEngine { request ->
+        logoutStatus: HttpStatusCode = HttpStatusCode.NoContent,
+        profileResponse: () -> String = { profiles }) = MockEngine { request ->
         val path = request.url.encodedPath
         when {
             path.endsWith("/user") -> respond(Json.encodeToString(user), HttpStatusCode.OK, headersOf("Content-Type", "application/json"))
@@ -84,7 +86,7 @@ class AuthCoordinatorTest {
                 entered?.complete(Unit)
                 // Deliberately finish an old response after cancellation to exercise the authorization fence.
                 if (release != null) withContext(NonCancellable) { release.await() }
-                respond(profiles, status, headersOf("Content-Type", "application/json"))
+                respond(profileResponse(), status, headersOf("Content-Type", "application/json"))
             }
             path.endsWith("/logout") -> respond(if (logoutStatus == HttpStatusCode.NoContent) "" else "{\"message\":\"synthetic revocation failure\"}", logoutStatus, headersOf("Content-Type", "application/json"))
             else -> error("Unexpected synthetic test endpoint")
@@ -282,6 +284,46 @@ class AuthCoordinatorTest {
         release.complete(Unit)
         await(owner, AccountState.SignedOut)
         assertNull(storage.read("session"))
+    }
+
+    @Test fun explicitProfileRecheckUsesFreshServerStateAndClearsStudentIdentity() = runBlocking<Unit> {
+        SecureSessionManager(storage).saveSession(session())
+        val response = AtomicReference("[]")
+        val owner = coordinator(engine("[]", profileResponse = { response.get() }))
+        await(owner, AccountState.RegistrationRequired)
+        // Opening or returning from an external page does not mutate native authority.
+        val registration = ph.edu.bsit.tcc.ojtdtr.navigation.WebDestinations.urlFor(owner.state.value,
+            ph.edu.bsit.tcc.ojtdtr.navigation.WebDestination.Registration)
+        assertEquals("https://bsit-tcc-ojt-dtr.vercel.app/signup", registration)
+        response.set(profile("pending"))
+        delay(100); assertEquals(AccountState.RegistrationRequired, owner.state.value)
+        owner.refreshProfile(); await(owner, AccountState.Pending)
+        assertNull(owner.studentIdentity.value)
+        response.set("[{\"id\":\"$userId\",\"role\":\"student\",\"status\":\"approved\",\"full_name\":\"Synthetic Student\",\"student_id\":\"SYNTHETIC-001\"}]")
+        owner.refreshProfile(); await(owner, AccountState.StudentApproved)
+        assertEquals(StudentIdentity("Synthetic Student", "SYNTHETIC-001"), owner.studentIdentity.value)
+        response.set(profile("rejected"))
+        owner.refreshProfile(); await(owner, AccountState.Rejected)
+        assertNull(owner.studentIdentity.value)
+        response.set(profile("unsupported"))
+        owner.refreshProfile(); await(owner, AccountState.AccessUnavailable(Failure.ProfileInvalid))
+        assertNull(owner.studentIdentity.value)
+        owner.logout(); await(owner, AccountState.SignedOut)
+        owner.refreshProfile(); delay(50); assertEquals(AccountState.SignedOut, owner.state.value)
+    }
+
+    @Test fun adminRecheckAndFailedStudentRecheckRemainFailClosed() = runBlocking<Unit> {
+        SecureSessionManager(storage).saveSession(session())
+        val response = AtomicReference(profile())
+        val owner = coordinator(engine(profile(), profileResponse = { response.get() }))
+        await(owner, AccountState.StudentApproved)
+        response.set("[{\"id\":\"$userId\",\"role\":\"admin\",\"status\":\"approved\"}]")
+        owner.refreshProfile(); await(owner, AccountState.AdminApproved)
+        assertNull(owner.studentIdentity.value)
+        response.set("[{\"id\":42}]")
+        owner.refreshProfile(); await(owner, AccountState.AccessUnavailable(Failure.ProfileInvalid))
+        owner.logout(); await(owner, AccountState.SignedOut)
+        assertNull(storage.read("session")); assertNull(owner.studentIdentity.value)
     }
 
 }

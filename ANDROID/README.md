@@ -1,9 +1,9 @@
 # BSIT-TCC OJT DTR — Android Companion
 
-U7.5B implements the native authentication foundation within the U7.4 Kotlin /
-Compose architecture. Permanent application ID and namespace:
+U7.5C builds a focused authenticated companion shell on the U7.5B/B.1 native
+authentication foundation within the U7.4 Kotlin / Compose architecture. Permanent application ID and namespace:
 `ph.edu.bsit.tcc.ojtdtr`. No attendance/activity writes, registration RPCs,
-dashboards, widgets or workers are implemented. U7.5C has not started.
+full dashboards, widgets or workers are implemented. U7.5C remains uncommitted for review.
 
 ## Toolchain and dependencies
 
@@ -77,7 +77,9 @@ existing account. Callback data is removed from the Activity intent after captur
 
 Restoration reads the encrypted native session, refreshes it when near expiry,
 validates its user with Supabase Auth and rereads **only its own** `public.profiles`
-row, selecting `id,role,status` with `id=eq.<authenticated user id>`. No cached role
+row, selecting `id,role,status,full_name,student_id` with
+`id=eq.<authenticated user id>`. Name and student ID are display-only server
+profile labels; they never determine authorization and are held only in memory. No cached role
 or Google user metadata authorizes the account. Failed queries stay closed and
 retryable; only a successful empty query for a verified Google identity leads to
 RegistrationRequired. Unsupported/malformed combinations fail closed.
@@ -134,17 +136,33 @@ adb -s emulator-5554 install -r app/build/outputs/apk/debug/app-debug.apk
 adb -s emulator-5554 shell am start -W -n ph.edu.bsit.tcc.ojtdtr/.MainActivity
 ```
 
-Welcome → Foundation/About → on-screen Back/system Back remains the U7.4 graph.
-Authentication uses a temporary panel on Welcome; no tokens or URLs enter routes
-or saved UI state. Backup opt-out and legacy/modern extraction exclusions are
+The companion home renders directly from the current coordinator account state;
+there is no approved route or route argument that can bypass that state. About
+remains a public informational destination; Back returns to the current account
+screen. Approved students see optional trusted name/student ID, approved status,
+and an explicit unconnected Today’s DTR section. Approved admins receive a web
+administration handoff. Pending accounts can refresh status; rejected accounts
+receive explanatory text and logout, without registration or approval actions.
+
+`WebDestinations` centralizes the U7.5A production origin
+`https://bsit-tcc-ojt-dtr.vercel.app` and the existing Vue `/signup` route.
+Registration is available only for RegistrationRequired; full-system handoff is
+available for approved student/admin and pending accounts. The normal browser
+opens fixed HTTPS destinations with no tokens, secrets, identity query parameters
+or session transfer. Browser sign-in is independent. Returning from the browser
+does not change native access; Refresh account status explicitly rereads the
+server through the same session/epoch/mutex guards as retry. Refresh immediately
+withdraws displayed approval and identity until fresh validation succeeds.
+No tokens or URLs enter routes or saved UI state. Backup opt-out and legacy/modern extraction exclusions are
 preserved. Cleartext traffic remains disabled. MainActivity is the only
 app-defined exported component; it now handles the narrow OAuth callback as well
 as launcher entry. Library permission-guarded services retain their U7.4 policy.
 
 Read `security/README.md` under the application package for limitations and
 `docs/U7.5B-verification.md` for the original verification record and
-`docs/U7.5B.1-verification.md` for the blocking review corrections. The mobile
-monorepo checkpoint remains unchanged; U7.5B.1 changes await another review gate.
+`docs/U7.5B.1-verification.md` for the blocking review corrections, and
+`docs/U7.5C-verification.md` for companion behavior and the recommended future
+widget boundary. The committed baseline is U7.5B.1; U7.5C changes await review.
 The adjustable wall-clock transaction-age finding and custom URI scheme handler
 ownership limitation remain documented and deferred; no App Links or transaction
 timing redesign is included.
