@@ -4,15 +4,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import kotlinx.coroutines.delay
-import java.time.Instant
-import java.time.Duration
-import ph.edu.bsit.tcc.ojtdtr.attendance.Manila
-import ph.edu.bsit.tcc.ojtdtr.auth.AccountState
+import androidx.core.content.ContextCompat
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import ph.edu.bsit.tcc.ojtdtr.auth.AuthCoordinator
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -31,22 +31,30 @@ fun CompanionNavigation(authentication: AuthCoordinator, onGoogle: (String) -> U
     val identity by authentication.studentIdentity.collectAsState()
     val attendance by authentication.attendance.state.collectAsState()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    DisposableEffect(lifecycle, authentication) {
+    val context = LocalContext.current
+    DisposableEffect(lifecycle, authentication, context) {
+        val owner = authentication.registerAttendanceLifecycle()
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) authentication.refreshAttendance()
-        }
-        lifecycle.addObserver(observer)
-        onDispose { lifecycle.removeObserver(observer) }
-    }
-    LaunchedEffect(account) {
-        if (account == AccountState.StudentApproved) {
-            authentication.refreshAttendance()
-            while (true) {
-                val now = Instant.now()
-                val nextDay = now.atZone(Manila).toLocalDate().plusDays(1).atStartOfDay(Manila).toInstant()
-                delay(Duration.between(now, nextDay).toMillis().coerceAtLeast(1000))
-                authentication.refreshAttendance()
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> authentication.attendanceForeground(owner, true)
+                Lifecycle.Event.ON_PAUSE -> authentication.attendanceForeground(owner, false)
+                else -> Unit
             }
+        }
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) { authentication.attendanceClockChanged(owner) }
+        }
+        ContextCompat.registerReceiver(context, receiver, IntentFilter().apply {
+            addAction(Intent.ACTION_TIME_CHANGED)
+            addAction(Intent.ACTION_TIMEZONE_CHANGED)
+            addAction(Intent.ACTION_DATE_CHANGED)
+        }, ContextCompat.RECEIVER_NOT_EXPORTED)
+        lifecycle.addObserver(observer)
+        authentication.attendanceForeground(owner, lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+        onDispose {
+            lifecycle.removeObserver(observer)
+            context.unregisterReceiver(receiver)
+            authentication.disposeAttendanceLifecycle(owner)
         }
     }
     val controller = rememberNavController()

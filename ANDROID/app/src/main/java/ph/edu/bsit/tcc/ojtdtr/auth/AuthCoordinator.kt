@@ -55,6 +55,9 @@ class AuthCoordinator internal constructor(context: Context,
     private val beforeVerifierSave: suspend () -> Unit = {},
     private val beforeSessionDelete: suspend () -> Unit = {},
     private val onClientCreated: (SupabaseClient) -> Unit = {},
+    attendanceClock: () -> java.time.Instant = java.time.Instant::now,
+    attendanceElapsed: () -> Long = android.os.SystemClock::elapsedRealtime,
+    attendanceWait: suspend (Long) -> Unit = { delay(it) },
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val mutableState = MutableStateFlow<AccountState>(AccountState.RestoringSession)
@@ -79,20 +82,47 @@ class AuthCoordinator internal constructor(context: Context,
     private var phase = OAuthPhase.Idle
     private class AttendanceBinding(val generation: Long, val client: SupabaseClient, val session: UserSession)
     private var attendanceBinding: AttendanceBinding? = null
-    val attendance = AttendanceRepository(read = ::readAttendance,
-        isCurrent = { it is AttendanceBinding && currentAttendance(it) })
+    val attendance = AttendanceRepository(read = ::readAttendance, clock = attendanceClock,
+        isCurrent = { it is AttendanceBinding && currentAttendance(it) },
+        elapsedMillis = attendanceElapsed)
     private var attendanceRequest: Job? = null
+    private var attendanceFollowup = false
+    private val attendanceLifecycle = AttendanceLifecycle(scope, attendance,
+        onResume = {
+            // Restore/login may already be validating. Otherwise withdraw cached approval first.
+            if (mutableState.value == AccountState.StudentApproved) recheckProfile()
+        },
+        onPause = { attendanceFollowup = false; attendanceRequest?.cancel(); attendance.stopRefresh() },
+        onBoundary = {
+            if (attendanceRequest?.isActive == true) attendanceFollowup = true else refreshAttendance()
+        }, wait = attendanceWait)
+
+    fun registerAttendanceLifecycle(): Any = attendanceLifecycle.register()
+    fun attendanceForeground(owner: Any, value: Boolean) { attendanceLifecycle.foreground(owner, value) }
+    fun disposeAttendanceLifecycle(owner: Any) { attendanceLifecycle.dispose(owner) }
+    fun attendanceClockChanged(owner: Any) { attendanceLifecycle.clockChanged(owner) }
 
     private fun clearAttendance() {
         attendanceBinding = null
+        attendanceFollowup = false
         attendanceRequest?.cancel()
         attendance.clear()
     }
 
     fun refreshAttendance() {
         if (mutableState.value != AccountState.StudentApproved) return
-        attendanceRequest?.cancel()
-        attendanceRequest = scope.launch { attendance.refresh() }
+        if (attendanceRequest?.isActive == true) return
+        val owner = attendanceBinding ?: return
+        attendanceRequest = scope.launch {
+            try { attendance.refresh() }
+            finally {
+                if (attendanceBinding === owner && attendanceFollowup && attendanceLifecycle.foreground) {
+                    attendanceFollowup = false
+                    attendanceRequest = null
+                    refreshAttendance() // One queued boundary read, never a retry loop.
+                }
+            }
+        }
     }
 
     /** Completion barrier for lifecycle verification; exposes no client, session or result. */
@@ -220,6 +250,7 @@ class AuthCoordinator internal constructor(context: Context,
                     val owner = AttendanceBinding(generation, active, accepted)
                     attendanceBinding = owner
                     attendance.bind(owner)
+                    if (attendanceLifecycle.foreground) refreshAttendance()
                 }
             }
         }
@@ -432,6 +463,7 @@ class AuthCoordinator internal constructor(context: Context,
     catch (_: Exception) { false }
 
     internal suspend fun close() {
+        attendanceLifecycle.close()
         clearAttendance()
         scope.cancel()
         operation?.join(); refresh?.join(); expiry?.join()

@@ -20,6 +20,7 @@ fun AttendanceSection(state: AttendanceState, onRefresh: () -> Unit) {
     val summary = when (state) {
         is AttendanceState.Fresh -> state.summary
         is AttendanceState.Stale -> state.summary
+        is AttendanceState.Refreshing -> state.summary
         else -> null
     }
     when (state) {
@@ -31,8 +32,9 @@ fun AttendanceSection(state: AttendanceState, onRefresh: () -> Unit) {
             AttendanceProblem.InvalidResponse -> "Attendance response could not be verified."
             else -> "Attendance could not be loaded. Check your connection and refresh."
         })
-        is AttendanceState.Stale -> Text("Stale data — offline, refresh failed, or the Philippine day has changed. Last confirmed: ${timestamp(state.fetchedAt)}")
-        is AttendanceState.Fresh -> Text("Confirmed: ${timestamp(state.fetchedAt)}")
+        is AttendanceState.Refreshing -> Text("Refreshing — previous confirmation: ${timestamp(state.fetchedAt)}")
+        is AttendanceState.Stale -> Text("Stale data — refresh required. Last checked (device clock): ${timestamp(state.fetchedAt)}")
+        is AttendanceState.Fresh -> Text("Fresh — last checked (device clock): ${timestamp(state.fetchedAt)}")
     }
     if (summary != null) {
         Text("Philippine attendance day: ${summary.day}")
@@ -46,5 +48,5 @@ fun AttendanceSection(state: AttendanceState, onRefresh: () -> Unit) {
         Text("Remaining hours: ${hours(summary.remainingSeconds)}")
         Text("Open sessions are excluded from completed hours.")
     }
-    Button(onClick = onRefresh, enabled = state != AttendanceState.Loading) { Text("Refresh attendance") }
+    Button(onClick = onRefresh, enabled = state != AttendanceState.Loading && state !is AttendanceState.Refreshing) { Text("Refresh attendance") }
 }

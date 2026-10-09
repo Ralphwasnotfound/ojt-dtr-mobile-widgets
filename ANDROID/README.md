@@ -1,9 +1,10 @@
 # BSIT-TCC OJT DTR — Android Companion
 
-U7.5D.1 adds validated, read-only Supabase attendance to the authenticated companion.
+U7.5D.2 adds foreground lifecycle revalidation and a two-minute attendance freshness policy
+to the validated, read-only Supabase attendance companion.
 The existing U7.5B/B.1/C authentication boundary remains in place. No attendance
 mutations, proof capture, widgets or workers are implemented. Changes await review;
-see `docs/U7.5D.1-verification.md` for the contract and verification limits.
+see `docs/U7.5D.2-verification.md` for the contract and verification limits.
 
 ## Toolchain and dependencies
 
@@ -140,7 +141,7 @@ The companion home renders directly from the current coordinator account state;
 there is no approved route or route argument that can bypass that state. About
 remains a public informational destination; Back returns to the current account
 screen. Approved students see optional trusted name/student ID, approved status,
-and an explicit unconnected Today’s DTR section. Approved admins receive a web
+and a validated read-only Today’s DTR section. Approved admins receive a web
 administration handoff. Pending accounts can refresh status; rejected accounts
 receive explanatory text and logout, without registration or approval actions.
 
@@ -149,9 +150,11 @@ receive explanatory text and logout, without registration or approval actions.
 Registration is available only for RegistrationRequired; full-system handoff is
 available for approved student/admin and pending accounts. The normal browser
 opens fixed HTTPS destinations with no tokens, secrets, identity query parameters
-or session transfer. Browser sign-in is independent. Returning from the browser
-does not change native access; Refresh account status explicitly rereads the
-server through the same session/epoch/mutex guards as retry. Refresh immediately
+or session transfer. Browser sign-in is independent. Returning to the foreground triggers approved-student
+authorization revalidation: previous approval and attendance are withdrawn, and
+native access is restored only after the current server profile confirms approval.
+Browser return alone never grants authorization. Refresh account status also rereads
+the server through the same session/epoch/mutex guards as retry. Refresh immediately
 withdraws displayed approval and identity until fresh validation succeeds.
 No tokens or URLs enter routes or saved UI state. Backup opt-out and legacy/modern extraction exclusions are
 preserved. Cleartext traffic remains disabled. MainActivity is the only
@@ -162,7 +165,7 @@ Read `security/README.md` under the application package for limitations and
 `docs/U7.5B-verification.md` for the original verification record and
 `docs/U7.5B.1-verification.md` for the blocking review corrections, and
 `docs/U7.5C-verification.md` for companion behavior and the recommended future
-widget boundary. The committed baseline is U7.5C (`96460d1`); U7.5D.1 changes await review.
+widget boundary. The committed baseline is U7.5D.1 (`ab0307b`); U7.5D.2 changes await review.
 The adjustable wall-clock transaction-age finding and custom URI scheme handler
 ownership limitation remain documented and deferred; no App Links or transaction
 timing redesign is included.

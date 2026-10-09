@@ -205,14 +205,15 @@ class AttendanceTest {
         release.complete(Unit); job.join()
         assertEquals(AttendanceState.AccountChanged, repository.state.value)
     }
-    @Test fun newestRefreshWinsEvenWithSameAccount() = runBlocking {
+    @Test fun overlappingRefreshesCoalesceForSameAccount() = runBlocking {
         var calls = 0
         val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>()
         val newer = summary(change("completed_seconds", JsonPrimitive(7200)))
         val repository = AttendanceRepository({ if (++calls == 1) { entered.complete(Unit); release.await(); summary() } else newer }, { now })
         repository.bind(Any()); val old = launch { repository.refresh() }; entered.await()
         repository.refresh(); release.complete(Unit); old.join()
-        assertEquals(newer, (repository.state.value as AttendanceState.Fresh).summary)
+        assertEquals(summary(), (repository.state.value as AttendanceState.Fresh).summary)
+        assertEquals(1, calls)
     }
     @Test fun previousManilaDayIsStaleInsteadOfFresh() = runBlocking {
         val repository = AttendanceRepository({ summary() }, { Instant.parse("2026-10-09T16:00:00Z") })
