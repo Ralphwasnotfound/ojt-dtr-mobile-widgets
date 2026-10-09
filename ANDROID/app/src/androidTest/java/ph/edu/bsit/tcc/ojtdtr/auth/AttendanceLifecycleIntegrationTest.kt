@@ -363,4 +363,24 @@ class AttendanceLifecycleIntegrationTest {
     @Test fun delayedWidgetRenderingAcrossSdkInvalidationRepairsEveryInstance() = delayedWidgetWithdrawal("invalidation")
     @Test fun delayedWidgetRenderingAcrossIdentityReplacementRepairsEveryInstance() = delayedWidgetWithdrawal("replacement")
 
+    @Test fun deniedAttendanceReadWithdrawsProofDespiteCachedApprovedAccount() = runBlocking<Unit> {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            attach(scenario); fresh()
+            val cancelled = CompletableDeferred<Unit>()
+            val ticket = withContext(Dispatchers.Main) { owner.proofTicket()!! }
+            val remove = withContext(Dispatchers.Main) { owner.registerProofCancellation(ticket) { cancelled.complete(Unit) } }
+            try {
+                status.set("rejected")
+                withContext(Dispatchers.Main) { owner.refreshAttendance() }
+                withTimeout(10000) { owner.attendance.state.first { it == AttendanceState.AccessDenied } }
+                withContext(Dispatchers.Main) {
+                    assertEquals(AccountState.StudentApproved, owner.state.value)
+                    assertFalse(owner.currentProof(ticket)); assertNull(owner.proofTicket())
+                }
+                withTimeout(10000) { cancelled.await() }
+                assertTrue(cancelled.isCompleted)
+            } finally { withContext(Dispatchers.Main) { remove() } }
+        }
+    }
+
 }

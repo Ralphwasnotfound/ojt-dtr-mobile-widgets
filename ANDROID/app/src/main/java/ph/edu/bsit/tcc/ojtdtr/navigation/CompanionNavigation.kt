@@ -23,6 +23,7 @@ import ph.edu.bsit.tcc.ojtdtr.ui.screen.CompanionScreen
 private enum class Destination(val route: String) {
     Welcome("welcome"),
     Foundation("foundation"),
+    Proof("proof"),
 }
 
 @Composable
@@ -65,11 +66,15 @@ fun CompanionNavigation(authentication: AuthCoordinator, onGoogle: (String) -> U
                 onCancel = authentication::cancelAuthentication, onRetry = authentication::retry,
                 onSignOut = authentication::logout, onRefresh = authentication::refreshProfile,
                 attendance = attendance, onAttendanceRefresh = authentication::refreshAttendance,
+                onProof = { if (authentication.proofTicket() != null) controller.navigate(Destination.Proof.route) { launchSingleTop = true } },
                 onWeb = { destination ->
                     WebDestinations.urlFor(authentication.state.value, destination)?.let(onWeb)
                 }, onFoundation = {
                 controller.navigate(Destination.Foundation.route) { launchSingleTop = true }
             })
+        }
+        composable(Destination.Proof.route) {
+            ph.edu.bsit.tcc.ojtdtr.proof.ProofScreen(authentication) { controller.popBackStack() }
         }
         composable(Destination.Foundation.route) {
             FoundationScreen(onBack = { controller.popBackStack() })

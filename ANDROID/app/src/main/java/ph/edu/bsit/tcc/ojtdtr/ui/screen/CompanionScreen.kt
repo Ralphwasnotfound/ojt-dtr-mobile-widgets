@@ -26,7 +26,7 @@ import ph.edu.bsit.tcc.ojtdtr.navigation.WebDestination
 fun CompanionScreen(account: AccountState, identity: StudentIdentity?, configured: Boolean,
     onGoogle: () -> Unit, onCancel: () -> Unit, onRetry: () -> Unit, onSignOut: () -> Unit,
     attendance: AttendanceState = AttendanceState.AccountChanged, onAttendanceRefresh: () -> Unit = {},
-    onRefresh: () -> Unit, onWeb: (WebDestination) -> Unit, onFoundation: () -> Unit) {
+    onProof: () -> Unit = {}, onRefresh: () -> Unit, onWeb: (WebDestination) -> Unit, onFoundation: () -> Unit) {
     Surface(Modifier.fillMaxSize()) {
         Column(Modifier.safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -42,6 +42,7 @@ fun CompanionScreen(account: AccountState, identity: StudentIdentity?, configure
                         Text(stringResource(R.string.identity_unavailable))
                     Text(stringResource(R.string.today_dtr), style = MaterialTheme.typography.titleMedium)
                     AttendanceSection(attendance, onAttendanceRefresh)
+                    Button(onClick = onProof) { Text("Device-only selfie/location preview") }
                 }
                 AccountState.AdminApproved -> {
                     Text(stringResource(R.string.admin_companion), style = MaterialTheme.typography.headlineSmall)

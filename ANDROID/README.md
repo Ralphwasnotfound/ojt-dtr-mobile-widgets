@@ -1,11 +1,12 @@
 # BSIT-TCC OJT DTR — Android Companion
 
-U7.5E.1 adds a read-only Jetpack Glance home-screen widget to the companion.
-The widget uses minimal coordinator-approved, in-memory presentation and conservatively
-labels attendance stale. Widget-only process startup does not initialize authentication.
-The existing U7.5B/B.1/C authentication boundary remains in place. No attendance
-mutations, proof capture or application background polling workers are implemented. Changes await review;
-see `docs/U7.5E.1-verification.md` for the contract and verification limits.
+U7.5F.1 adds an approved-student, device-only selfie/location preview using CameraX
+and foreground Android location APIs. Temporary proof is private and disposable;
+confirmation revalidates authorization but records no attendance and uploads nothing.
+The read-only widget, authentication fencing and attendance lifecycle remain in place.
+No attendance mutations, proof uploads or application background polling workers exist.
+These changes await manual hardware verification and adversarial review; see
+`docs/U7.5F.1-verification.md` for evidence and limitations.
 
 ## Toolchain and dependencies
 
@@ -15,7 +16,8 @@ see `docs/U7.5E.1-verification.md` for the contract and verification limits.
 | Kotlin, Compose compiler, serialization plugin | 2.2.21 |
 | Compose BOM / UI-runtime / Material 3 | 2025.10.01 / 1.9.4 / 1.4.0 |
 | Core KTX / Activity Compose / Navigation Compose | 1.17.0 / 1.11.0 / 2.9.5 |
-| Glance / WorkManager (dependencies only) | 1.1.1 / 2.10.1 |
+| Glance / WorkManager | 1.1.1 / 2.10.1 |
+| CameraX / ExifInterface | 1.5.3 / 1.4.2 |
 | Supabase BOM, Auth, PostgREST | 3.2.6 |
 | Ktor Android engine / test-only Mock engine | 3.3.1 |
 | AndroidX Browser | 1.9.0 |
@@ -166,7 +168,7 @@ Read `security/README.md` under the application package for limitations and
 `docs/U7.5B-verification.md` for the original verification record and
 `docs/U7.5B.1-verification.md` for the blocking review corrections, and
 `docs/U7.5C-verification.md` for companion behavior and the recommended future
-widget boundary. The committed baseline is U7.5D.2 (`7f3d7b1`); U7.5E.1 changes await review.
+widget boundary. The committed baseline is U7.5E.2 (`513db52`); U7.5F.1 changes await verification/review.
 The adjustable wall-clock transaction-age finding and custom URI scheme handler
 ownership limitation remain documented and deferred; no App Links or transaction
 timing redesign is included.

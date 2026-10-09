@@ -11,6 +11,13 @@ import ph.edu.bsit.tcc.ojtdtr.widget.WidgetPresentation
 import ph.edu.bsit.tcc.ojtdtr.widget.WidgetPublication
 
 class DtrApplication : Application() {
+    internal var proofStorageReady = true
+        private set
+    override fun onCreate() {
+        super.onCreate()
+        // Cache is excluded from backup; discard orphan proof files after process restart.
+        proofStorageReady = try { java.io.File(cacheDir, "native-proof").deleteRecursively() } catch (_: Exception) { false }
+    }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val publication = WidgetPublication<GlanceId>(
         current = { currentWidgetPresentation() },

@@ -102,7 +102,46 @@ class AuthCoordinator internal constructor(context: Context,
     fun disposeAttendanceLifecycle(owner: Any) { attendanceLifecycle.dispose(owner) }
     fun attendanceClockChanged(owner: Any) { attendanceLifecycle.clockChanged(owner) }
 
+    private val proofCancellations = mutableSetOf<() -> Unit>()
+    internal fun proofTicket(): Any? = attendanceBinding?.takeIf { currentProof(it) }
+    internal fun currentProof(ticket: Any): Boolean =
+        attendance.state.value != AttendanceState.AccessDenied &&
+        (ticket as? AttendanceBinding)?.let(::currentAttendance) == true
+    internal fun registerProofCancellation(ticket: Any, cancel: () -> Unit): () -> Unit {
+        if (currentProof(ticket)) proofCancellations += cancel else cancel()
+        val observer = scope.launch {
+            attendance.state.collect { if (!currentProof(ticket)) cancel() }
+        }
+        return { observer.cancel(); proofCancellations -= cancel }
+    }
+    internal suspend fun revalidateProof(ticket: Any): Boolean {
+        val owner = ticket as? AttendanceBinding ?: return false
+        if (!currentAttendance(owner)) return false
+        return try {
+            kotlinx.coroutines.withTimeout(15000) {
+                val user = owner.client.auth.retrieveUserForCurrentSession(updateSession = false)
+                if (!currentAttendance(owner) || user.id != owner.session.user?.id) return@withTimeout false
+                val profile = owner.client.from("profiles").select(columns = Columns.list("id", "role", "status", "required_hours")) {
+                    filter { eq("id", user.id) }
+                }.data
+                if (!currentAttendance(owner)) return@withTimeout false
+                AttendanceContract.requiredHours(profile, user.id)
+                currentAttendance(owner)
+            }
+        } catch (cancelled: CancellationException) {
+            if (cancelled !is TimeoutCancellationException) throw cancelled
+            if (currentAttendance(owner)) publish(owner.generation, AccountState.AccessUnavailable(Failure.ProfileRead, true))
+            false
+        } catch (_: Exception) {
+            if (currentAttendance(owner)) publish(owner.generation, AccountState.AccessUnavailable(Failure.ProfileRead, true))
+            false
+        }
+    }
+
     private fun clearAttendance() {
+        val cancellations = proofCancellations.toList()
+        proofCancellations.clear()
+        cancellations.forEach { it() }
         attendanceBinding = null
         attendanceFollowup = false
         attendanceRequest?.cancel()

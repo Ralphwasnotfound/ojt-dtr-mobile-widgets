@@ -2,6 +2,10 @@
 
 package ph.edu.bsit.tcc.ojtdtr.auth
 
+import androidx.activity.compose.setContent
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.collectAsState
 import android.content.Context
 import android.content.ContextWrapper
 import androidx.test.platform.app.InstrumentationRegistry
@@ -515,6 +519,97 @@ class AuthCoordinatorTest {
         } finally {
             release.complete(Unit); observer.cancelAndJoin()
             withContext(Dispatchers.Main) { owner.disposeAttendanceLifecycle(lifecycle) }
+        }
+    }
+
+    @Test fun proofEntryRejectsEveryNonStudentAuthorization() = runBlocking<Unit> {
+        for (status in listOf("pending", "rejected", "archived")) {
+            SecureSessionManager(storage).saveSession(session())
+            val owner = withContext(Dispatchers.Main) { coordinator(engine(profile(status))) }
+            withTimeout(15000) { owner.state.first { it !in listOf(AccountState.RestoringSession, AccountState.LoadingProfile) } }
+            withContext(Dispatchers.Main) { assertNull(owner.proofTicket()); owner.close() }
+        }
+        SecureSessionManager(storage).saveSession(session())
+        val admin = withContext(Dispatchers.Main) { coordinator(engine(profile().replace("student", "admin"))) }
+        await(admin, AccountState.AdminApproved)
+        withContext(Dispatchers.Main) { assertNull(admin.proofTicket()); admin.logout() }
+        await(admin, AccountState.SignedOut)
+        withContext(Dispatchers.Main) { assertNull(admin.proofTicket()) }
+    }
+    @Test fun proofConfirmationRevalidatesApprovedProfileAndRevocationWithdrawsLease() = runBlocking<Unit> {
+        SecureSessionManager(storage).saveSession(session())
+        val response = AtomicReference(profile().replace("}]", ",\"required_hours\":486}]"))
+        val owner = withContext(Dispatchers.Main) { coordinator(engine(response.get(), profileResponse = { response.get() })) }
+        await(owner, AccountState.StudentApproved)
+        var stopped = false
+        withContext(Dispatchers.Main) {
+            val ticket = owner.proofTicket()!!
+            val remove = owner.registerProofCancellation(ticket) { stopped = true }
+            assertTrue(owner.revalidateProof(ticket)); assertFalse(stopped)
+            response.set(response.get().replace("approved", "rejected"))
+            assertFalse(owner.revalidateProof(ticket))
+            assertTrue(stopped); assertFalse(owner.currentProof(ticket)); assertNull(owner.proofTicket())
+            remove()
+        }
+    }
+    @Test fun logoutCancelsRealProofSessionAndDeletesNonCooperativeLateCapture() = runBlocking<Unit> {
+        SecureSessionManager(storage).saveSession(session())
+        val owner = withContext(Dispatchers.Main) { coordinator(engine(profile())) }
+        await(owner, AccountState.StudentApproved)
+        val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>(); val done = CompletableDeferred<Unit>()
+        val proofRoot = File(root, "device-proof")
+        val camera = object : ph.edu.bsit.tcc.ojtdtr.proof.ProofCamera {
+            override suspend fun capture(file: File) {
+                entered.complete(Unit)
+                withContext(NonCancellable) { release.await(); file.parentFile!!.mkdirs(); file.writeBytes(byteArrayOf(1)); done.complete(Unit) }
+            }
+            override fun stop() = Unit
+        }
+        val location = object : ph.edu.bsit.tcc.ojtdtr.proof.ProofLocation {
+            override suspend fun acquire(): ph.edu.bsit.tcc.ojtdtr.proof.Fix = error("not requested")
+            override fun stop() = Unit
+        }
+        val proof = withContext(Dispatchers.Main) {
+            val ticket = owner.proofTicket()!!
+            ph.edu.bsit.tcc.ojtdtr.proof.ProofSession(CoroutineScope(Dispatchers.Main), proofRoot, camera, location,
+                { owner.currentProof(ticket) }, { owner.revalidateProof(ticket) }, { 1000 }).also {
+                owner.registerProofCancellation(ticket, it::close)
+                it.capture(ph.edu.bsit.tcc.ojtdtr.proof.Permission.Granted)
+            }
+        }
+        try {
+            withTimeout(10000) { entered.await() }
+            withContext(Dispatchers.Main) { owner.logout(); assertTrue(proof.state.value.closed) }
+            release.complete(Unit); withTimeout(10000) { done.await() }
+            withContext(Dispatchers.Main) { assertFalse(proof.state.value.captured); assertEquals(0, proofRoot.walkTopDown().filter { it.isFile }.count()) }
+            await(owner, AccountState.SignedOut)
+        } finally { release.complete(Unit); withContext(Dispatchers.Main) { proof.close() } }
+    }
+
+    @Test fun manualSamsungDeviceOnlyProofHardware() = runBlocking<Unit> {
+        org.junit.Assume.assumeTrue(androidx.test.platform.app.InstrumentationRegistry.getArguments().getString("proofManual") == "true")
+        SecureSessionManager(storage).saveSession(session())
+        val owner = withContext(Dispatchers.Main) { coordinator(engine(profile().replace("}]", ",\"required_hours\":486}]"))) }
+        await(owner, AccountState.StudentApproved)
+        val finished = CompletableDeferred<Unit>()
+        androidx.test.core.app.ActivityScenario.launch(ph.edu.bsit.tcc.ojtdtr.MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity -> activity.setContent {
+                ph.edu.bsit.tcc.ojtdtr.ui.theme.OjtDtrTheme {
+                    var open by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+                    val account by owner.state.collectAsState()
+                    if (open) ph.edu.bsit.tcc.ojtdtr.proof.ProofScreen(owner) { open = false }
+                    else androidx.compose.foundation.layout.Column {
+                        androidx.compose.material3.Text("Synthetic approved account — hardware verification only")
+                        androidx.compose.material3.Text("No production account, upload or attendance mutation")
+                        androidx.compose.material3.Button(onClick = { open = true }, enabled = account == AccountState.StudentApproved) {
+                            androidx.compose.material3.Text("Open device preview")
+                        }
+                        androidx.compose.material3.Button(onClick = owner::logout) { androidx.compose.material3.Text("Sign out synthetic account") }
+                        androidx.compose.material3.Button(onClick = { finished.complete(Unit) }) { androidx.compose.material3.Text("Finish hardware check") }
+                    }
+                }
+            } }
+            withTimeout(600000) { finished.await() }
         }
     }
 
