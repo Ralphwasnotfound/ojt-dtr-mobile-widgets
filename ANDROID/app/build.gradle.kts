@@ -92,7 +92,7 @@ dependencies {
     androidTestImplementation(libs.androidx.test.junit)
     androidTestImplementation(libs.ktor.mock)
 
-    // Dependency foundation only: no widget providers or workers.
+    // Pinned Glance foundation; no application polling worker or background service.
     implementation(libs.androidx.glance.appwidget)
     implementation(libs.androidx.work.runtime)
 }

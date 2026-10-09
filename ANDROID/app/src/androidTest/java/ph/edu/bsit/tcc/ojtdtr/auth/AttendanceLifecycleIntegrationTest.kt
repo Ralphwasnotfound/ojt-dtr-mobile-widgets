@@ -28,6 +28,9 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.combine
+import ph.edu.bsit.tcc.ojtdtr.widget.WidgetPublication
+import ph.edu.bsit.tcc.ojtdtr.widget.WidgetPresentation
 import kotlinx.serialization.json.Json
 import org.junit.After
 import org.junit.Before
@@ -124,6 +127,7 @@ class AttendanceLifecycleIntegrationTest {
     private suspend fun fresh() = withTimeout(15_000) {
         owner.attendance.state.first { it is AttendanceState.Fresh }
         owner.awaitAttendanceIdle()
+        withContext(Dispatchers.Main) { assertNotNull(owner.widgetPresentation().completed) }
     }
     @Test fun realResumeRecreationAndRecompositionRevalidateOnce() = runBlocking<Unit> {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
@@ -155,9 +159,11 @@ class AttendanceLifecycleIntegrationTest {
             withTimeout(10_000) { profileEntered.await() }
             assertNotEquals(AccountState.StudentApproved, owner.state.value)
             assertEquals(AttendanceState.AccountChanged, owner.attendance.state.value)
+            withContext(Dispatchers.Main) { assertNull(owner.widgetPresentation().completed) }
             val before = summaries.get(); status.set("rejected"); profileRelease.complete(Unit)
             withTimeout(10_000) { owner.state.first { it == AccountState.Rejected } }
             assertEquals(before, summaries.get()); assertEquals(AttendanceState.AccountChanged, owner.attendance.state.value)
+            withContext(Dispatchers.Main) { assertNull(owner.widgetPresentation().completed) }
         }
     }
     @Test fun offlineForegroundRevalidationDoesNotClaimCurrentApproval() = runBlocking<Unit> {
@@ -166,6 +172,7 @@ class AttendanceLifecycleIntegrationTest {
             val before = summaries.get(); mode.set("offline"); scenario.moveToState(Lifecycle.State.RESUMED)
             withTimeout(10_000) { owner.state.first { it == AccountState.AccessUnavailable(Failure.ProfileRead, true) } }
             assertEquals(before, summaries.get()); assertEquals(AttendanceState.AccountChanged, owner.attendance.state.value)
+            withContext(Dispatchers.Main) { assertNull(owner.widgetPresentation().completed) }
         }
     }
     @Test fun sdkInvalidationImmediatelyClearsForegroundAttendance() = runBlocking<Unit> {
@@ -174,6 +181,7 @@ class AttendanceLifecycleIntegrationTest {
             withContext(Dispatchers.Main) { sdk.auth.clearSession() }
             withTimeout(10_000) { owner.state.first { it == AccountState.SignedOut } }
             assertEquals(AttendanceState.AccountChanged, owner.attendance.state.value)
+            withContext(Dispatchers.Main) { assertNull(owner.widgetPresentation().completed) }
         }
     }
     private suspend fun nextWake(): Wake = withTimeout(10000) {
@@ -213,6 +221,7 @@ class AttendanceLifecycleIntegrationTest {
             withContext(Dispatchers.Main) { owner.logout() }
             withTimeout(10000) { owner.state.first { it == AccountState.SignedOut } }
             assertEquals(AttendanceState.AccountChanged, owner.attendance.state.value)
+            withContext(Dispatchers.Main) { assertNull(owner.widgetPresentation().completed) }
         }
     }
     @Test fun overlappingNavigationMidnightCompletesQueuedCoordinatorFollowup() = runBlocking<Unit> {
@@ -247,6 +256,7 @@ class AttendanceLifecycleIntegrationTest {
             }
             withTimeout(10000) { owner.state.first { it == AccountState.SignedOut } }
             assertEquals(AttendanceState.AccountChanged, owner.attendance.state.value)
+            withContext(Dispatchers.Main) { assertNull(owner.widgetPresentation().completed) }
         }
     }
 
@@ -258,10 +268,99 @@ class AttendanceLifecycleIntegrationTest {
             withTimeout(10000) { summaryEntered.await() }
             withContext(Dispatchers.Main) { owner.logout() }
             assertEquals(AttendanceState.AccountChanged, owner.attendance.state.value)
+            withContext(Dispatchers.Main) { assertNull(owner.widgetPresentation().completed) }
             summaryRelease.complete(Unit)
             withTimeout(10000) { summaryCompleted.await(); owner.awaitAttendanceIdle(); owner.state.first { it == AccountState.SignedOut } }
             assertEquals(AttendanceState.AccountChanged, owner.attendance.state.value)
+            withContext(Dispatchers.Main) { assertNull(owner.widgetPresentation().completed) }
         }
     }
+
+    @Test fun sdkIdentityReplacementDuringBlockedAttendanceWithOverlappingOwnersRejectsLateData() = runBlocking<Unit> {
+        val a = ScreenOwner(); val b = ScreenOwner(); val showA = mutableStateOf(true)
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            overlap(scenario, a, b, showA); fresh(); mode.set("summaryBlocked")
+            withContext(Dispatchers.Main) { owner.refreshAttendance() }
+            withTimeout(10000) { summaryEntered.await() }
+            withContext(Dispatchers.Main) {
+                sdk.auth.importSession(UserSession(accessToken = "synthetic-replacement-access", refreshToken = "synthetic-replacement-refresh",
+                    expiresIn = 3600, tokenType = "bearer", user = UserInfo(aud = "authenticated", id = "33333333-3333-4333-8333-333333333333"),
+                    expiresAt = Clock.System.now() + 3600.seconds), autoRefresh = false)
+            }
+            withTimeout(10000) { owner.attendance.state.first { it == AttendanceState.AccountChanged } }
+            withContext(Dispatchers.Main) { assertNull(owner.widgetPresentation().completed) }
+            summaryRelease.complete(Unit)
+            withTimeout(10000) { summaryCompleted.await(); owner.awaitAttendanceIdle(); owner.state.first { it == AccountState.SignedOut } }
+            assertEquals(AttendanceState.AccountChanged, owner.attendance.state.value)
+            withContext(Dispatchers.Main) { assertNull(owner.widgetPresentation().completed) }
+        }
+    }
+
+    private fun delayedWidgetWithdrawal(reason: String) = runBlocking<Unit> {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            attach(scenario); fresh()
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val repaired = CompletableDeferred<Unit>()
+            val host = mutableMapOf<Int, WidgetPresentation>()
+            var blocked = false
+            var neutralFailure = false
+            lateinit var publisher: WidgetPublication<Int>
+            val job = withContext(Dispatchers.Main) {
+                publisher = WidgetPublication(current = { owner.widgetPresentation() }, instances = { listOf(1, 2) },
+                    update = { id ->
+                        val captured = publisher.presentation.value
+                        if (!blocked && captured.completed != null) {
+                            blocked = true; entered.complete(Unit)
+                            withContext(NonCancellable) { release.await() }
+                            host[id] = captured // Simulate an already submitted old host rendering.
+                        } else {
+                            if (id == 1 && captured.completed == null && !neutralFailure) {
+                                neutralFailure = true; throw java.io.IOException("Synthetic host failure")
+                            }
+                            host[id] = captured
+                            if (host.size == 2 && host.values.all { it.completed == null }) repaired.complete(Unit)
+                        }
+                    })
+                CoroutineScope(Dispatchers.Main).launch {
+                    publisher.observe(combine(owner.state, owner.attendance.state) { _, _ -> Unit })
+                }
+            }
+            try {
+                withTimeout(10000) { entered.await() }
+                withContext(Dispatchers.Main) {
+                    when (reason) {
+                        "logout" -> owner.logout()
+                        "revocation" -> { status.set("rejected"); owner.refreshProfile() }
+                        "invalidation" -> sdk.auth.clearSession()
+                        "replacement" -> sdk.auth.importSession(UserSession(
+                            accessToken = "synthetic-replacement-access", refreshToken = "synthetic-replacement-refresh",
+                            expiresIn = 3600, tokenType = "bearer",
+                            user = UserInfo(aud = "authenticated", id = "33333333-3333-4333-8333-333333333333"),
+                            expiresAt = Clock.System.now() + 3600.seconds), autoRefresh = false)
+                    }
+                }
+                withTimeout(10000) { publisher.presentation.first { it.completed == null } }
+                assertFalse(release.isCompleted) // Withdrawal precedes completion of old rendering.
+                val reads = summaries.get()
+                release.complete(Unit)
+                withTimeout(10000) { repaired.await() }
+                withContext(Dispatchers.Main) {
+                    assertTrue(neutralFailure)
+                    assertEquals(setOf(1, 2), host.keys)
+                    assertTrue(host.values.all { it.completed == null })
+                    assertNull(publisher.presentation.value.completed)
+                }
+                assertEquals(reads, summaries.get()) // Publication itself never reads attendance.
+            } finally {
+                release.complete(Unit)
+                job.cancelAndJoin()
+            }
+        }
+    }
+    @Test fun delayedWidgetRenderingAcrossLogoutRepairsEveryInstance() = delayedWidgetWithdrawal("logout")
+    @Test fun delayedWidgetRenderingAcrossRevocationRepairsEveryInstance() = delayedWidgetWithdrawal("revocation")
+    @Test fun delayedWidgetRenderingAcrossSdkInvalidationRepairsEveryInstance() = delayedWidgetWithdrawal("invalidation")
+    @Test fun delayedWidgetRenderingAcrossIdentityReplacementRepairsEveryInstance() = delayedWidgetWithdrawal("replacement")
 
 }

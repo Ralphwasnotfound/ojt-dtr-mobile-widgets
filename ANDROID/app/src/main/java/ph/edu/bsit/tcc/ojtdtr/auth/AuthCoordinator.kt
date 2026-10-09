@@ -128,6 +128,13 @@ class AuthCoordinator internal constructor(context: Context,
     /** Completion barrier for lifecycle verification; exposes no client, session or result. */
     internal suspend fun awaitAttendanceIdle() { attendanceRequest?.join() }
 
+    internal fun widgetPresentation(): ph.edu.bsit.tcc.ojtdtr.widget.WidgetPresentation {
+        attendance.reassess()
+        val owner = attendanceBinding
+        return ph.edu.bsit.tcc.ojtdtr.widget.WidgetPresentation.derive(mutableState.value, attendance.state.value,
+            owner != null && currentAttendance(owner))
+    }
+
     private fun currentAttendance(owner: AttendanceBinding): Boolean {
         val current = owner.client.auth.currentSessionOrNull()
         return attendanceBinding === owner && client === owner.client && epoch.isCurrent(owner.generation) &&

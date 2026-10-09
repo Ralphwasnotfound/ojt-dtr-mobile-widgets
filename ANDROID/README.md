@@ -1,10 +1,11 @@
 # BSIT-TCC OJT DTR — Android Companion
 
-U7.5D.2 adds foreground lifecycle revalidation and a two-minute attendance freshness policy
-to the validated, read-only Supabase attendance companion.
+U7.5E.1 adds a read-only Jetpack Glance home-screen widget to the companion.
+The widget uses minimal coordinator-approved, in-memory presentation and conservatively
+labels attendance stale. Widget-only process startup does not initialize authentication.
 The existing U7.5B/B.1/C authentication boundary remains in place. No attendance
-mutations, proof capture, widgets or workers are implemented. Changes await review;
-see `docs/U7.5D.2-verification.md` for the contract and verification limits.
+mutations, proof capture or application background polling workers are implemented. Changes await review;
+see `docs/U7.5E.1-verification.md` for the contract and verification limits.
 
 ## Toolchain and dependencies
 
@@ -165,7 +166,20 @@ Read `security/README.md` under the application package for limitations and
 `docs/U7.5B-verification.md` for the original verification record and
 `docs/U7.5B.1-verification.md` for the blocking review corrections, and
 `docs/U7.5C-verification.md` for companion behavior and the recommended future
-widget boundary. The committed baseline is U7.5D.1 (`ab0307b`); U7.5D.2 changes await review.
+widget boundary. The committed baseline is U7.5D.2 (`7f3d7b1`); U7.5E.1 changes await review.
 The adjustable wall-clock transaction-age finding and custom URI scheme handler
 ownership limitation remain documented and deferred; no App Links or transaction
 timing redesign is included.
+
+
+## Home-screen widget
+
+Add OJT DTR through the launcher widget picker (initially 4 × 3 cells; resizable).
+Tapping opens the native companion. Signed-out or unknown authority shows a safe
+sign-in/open-app message. Approved live coordinator data may show completed/remaining
+hours and timed-in/out status; it is always labelled stale until verified in the app.
+There are no widget Time In/Out or independent backend refresh actions.
+No durable attendance cache is stored. A widget-only process starts unavailable without
+initializing authentication. Launchers may retain previously delivered RemoteViews;
+redraw and withdrawal are asynchronous, and exact expiry timing is not guaranteed.
+See the widget verification record for tested device behavior and security limitations.
