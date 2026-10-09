@@ -82,4 +82,16 @@ class RecoveryStorageTest {
         assertEquals(0,mode and (android.system.OsConstants.S_IROTH or android.system.OsConstants.S_IWOTH))
     }
 
+    @Test fun encryptedSchemaOneIntentMigratesWithoutLosingUncertainty() {
+        val old=RecoveryRecord(owner=uid,request=req,action="time_in",phase=RecoveryPhase.PrepareIntent)
+        val bytes=kotlinx.serialization.json.Json.encodeToString(old).toByteArray()
+        try{store().replace(bytes)}finally{bytes.fill(0)}
+        val j=RecoveryJournal(store());assertEquals(old,j.load())
+        val next=j.recoverIdentity(old,req,uid){true}
+        assertEquals(2,next.schema);assertEquals(old.phase,next.phase);assertTrue(next.recovered)
+        assertEquals(next,RecoveryJournal(store()).load())
+        val ciphertext=String(disk().readBytes(),Charsets.ISO_8859_1)
+        assertFalse(ciphertext.contains(req));assertFalse(ciphertext.contains(uid))
+    }
+
 }

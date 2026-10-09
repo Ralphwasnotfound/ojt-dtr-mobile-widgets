@@ -10,14 +10,15 @@ internal enum class RecoveryPhase { PrepareIntent, Prepared, UploadIntent, Uploa
 @Serializable
 internal data class RecoveryRecord(val schema: Int = 1, val revision: Long = 1,
     val owner: String, val request: String, val action: String, val phase: RecoveryPhase,
-    val upload: String? = null, val session: String? = null) {
+    val upload: String? = null, val session: String? = null, val recovered: Boolean = false) {
     fun validate(): RecoveryRecord = apply {
-        require(schema == 1 && revision in 1 until Long.MAX_VALUE)
+        require(schema in 1..2 && revision in 1 until Long.MAX_VALUE)
         ProofContract.uuid(owner); ProofContract.uuid(request)
         require(action in setOf("time_in", "time_out"))
         require((upload == null) == (session == null))
         upload?.let(ProofContract::uuid); session?.let(ProofContract::uuid)
-        require(if (phase == RecoveryPhase.PrepareIntent) upload == null else upload != null)
+        require(!recovered || (schema == 2 && upload != null))
+        require(if (phase == RecoveryPhase.PrepareIntent) upload == null || recovered else upload != null)
     }
 }
 internal class RecoveryStorageFailure : Exception()
@@ -52,15 +53,29 @@ internal class RecoveryJournal(private val storage: JournalStorage) {
     }
     fun begin(owner: String, request: String, action: String, current: () -> Boolean): RecoveryRecord = synchronized(lock) {
         if (!current() || read() != null) throw RecoveryStorageFailure()
-        RecoveryRecord(owner = owner, request = request, action = action, phase = RecoveryPhase.PrepareIntent).also(::write)
+        RecoveryRecord(schema = 2, owner = owner, request = request, action = action, phase = RecoveryPhase.PrepareIntent).also(::write)
     }
     fun advance(expected: RecoveryRecord, phase: RecoveryPhase, current: () -> Boolean,
         upload: String? = expected.upload, session: String? = expected.session): RecoveryRecord = synchronized(lock) {
         if (!current() || read() != expected) throw RecoveryStorageFailure()
         require(phase == RecoveryPhase.Confirmed || phase.ordinal == expected.phase.ordinal + 1)
         require(expected.phase != RecoveryPhase.Confirmed)
+        require(!expected.recovered || phase == RecoveryPhase.Confirmed)
         if (expected.upload != null) require(upload == expected.upload && session == expected.session)
-        expected.copy(revision = expected.revision + 1, phase = phase, upload = upload, session = session).also(::write)
+        expected.copy(schema = 2, revision = expected.revision + 1, phase = phase, upload = upload, session = session).also(::write)
+    }
+
+    /** Observation only: never advance interrupted network phase or authorize a replay. */
+    fun recoverIdentity(expected: RecoveryRecord, upload: String, session: String,
+        current: () -> Boolean): RecoveryRecord = synchronized(lock) {
+        if (!current() || read() != expected) throw RecoveryStorageFailure()
+        ProofContract.uuid(upload); ProofContract.uuid(session)
+        if (expected.upload != null) {
+            if (expected.upload != upload || expected.session != session) throw RecoveryStorageFailure()
+            return@synchronized expected
+        }
+        expected.copy(schema = 2, revision = expected.revision + 1, upload = upload,
+            session = session, recovered = true).also(::write)
     }
 
     /** Idempotent only after the caller validates an authoritative receipt for expected identity.
@@ -75,7 +90,7 @@ internal class RecoveryJournal(private val storage: JournalStorage) {
             stored.upload != expected.upload || stored.session != expected.session ||
             stored.revision < expected.revision) throw RecoveryStorageFailure()
         val confirmed = if (stored.phase == RecoveryPhase.Confirmed) stored else
-            stored.copy(revision = stored.revision + 1, phase = RecoveryPhase.Confirmed).also(::write)
+            stored.copy(schema = 2, revision = stored.revision + 1, phase = RecoveryPhase.Confirmed).also(::write)
         clearConfirmed(confirmed, current)
     }
     fun clearConfirmed(expected: RecoveryRecord, current: () -> Boolean) = synchronized(lock) {

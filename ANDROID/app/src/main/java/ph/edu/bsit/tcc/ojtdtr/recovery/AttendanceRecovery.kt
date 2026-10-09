@@ -10,7 +10,11 @@ import ph.edu.bsit.tcc.ojtdtr.proof.ProofContract
 
 /** Presentation deliberately carries no account, request, upload, session or receipt identifiers. */
 enum class RecoveryStatus { Hidden, Checking, None, Unresolved, Confirmed, Unavailable }
-internal fun interface RecoveryReader { suspend fun receipt(record: RecoveryRecord): String }
+internal fun interface RecoveryReader {
+    suspend fun receipt(record: RecoveryRecord): String
+    // Legacy fixture/receipt readers remain supported; production always overrides this.
+    suspend fun observation(record: RecoveryRecord): RecoveryObservation? = null
+}
 
 /** Main-dispatcher owner. Independent of Activity; reads only, never owns a mutation transport. */
 internal class AttendanceRecovery(private val scope: CoroutineScope, private val journal: RecoveryJournal,
@@ -44,16 +48,29 @@ internal class AttendanceRecovery(private val scope: CoroutineScope, private val
         work = scope.launch {
             fun current() = binding === owner && owner.accepted()
             try {
-                val record = withContext(io) { journal.load() }
+                val loaded = withContext(io) { journal.load() }
                 if (!current()) return@launch
-                if (record == null) { blocked = false; mutable.value = RecoveryStatus.None; return@launch }
+                if (loaded == null) { blocked = false; mutable.value = RecoveryStatus.None; return@launch }
+                var record: RecoveryRecord = loaded
                 if (record.owner != owner.uid) { mutable.value = RecoveryStatus.Unresolved; return@launch }
-                // No exposed request lookup exists. Never replay prepare to retrieve a lost response.
-                if (record.upload == null || record.session == null) { mutable.value = RecoveryStatus.Unresolved; return@launch }
-                val raw = withTimeout(deadline) { owner.reader.receipt(record) }
+                val observed = withTimeout(deadline) { owner.reader.observation(record) }
                 if (!current()) return@launch
-                if (!confirmedReceipt(raw, record)) { mutable.value = RecoveryStatus.Unresolved; return@launch }
-                withContext(io) { journal.confirmAndClear(record) { owner.valid.get() } }
+                if (observed != null) {
+                    val identity = observed.reservation
+                    if (identity == null || observed.objectStatus == "unknown") { mutable.value = RecoveryStatus.Unresolved; return@launch }
+                    record = withContext(io) { journal.recoverIdentity(record, identity.upload,
+                        identity.session) { owner.accepted() } }
+                    if (!current()) return@launch
+                    if (!observed.confirmed) { mutable.value = RecoveryStatus.Unresolved; return@launch }
+                } else {
+                    if (record.upload == null || record.session == null) {
+                        mutable.value = RecoveryStatus.Unresolved; return@launch
+                    }
+                    val raw = withTimeout(deadline) { owner.reader.receipt(record) }
+                    if (!current()) return@launch
+                    if (!confirmedReceipt(raw, record)) { mutable.value = RecoveryStatus.Unresolved; return@launch }
+                }
+                withContext(io) { journal.confirmAndClear(record) { owner.accepted() } }
                 if (!current()) return@launch
                 blocked = false; mutable.value = RecoveryStatus.Confirmed
             } catch (_: TimeoutCancellationException) {

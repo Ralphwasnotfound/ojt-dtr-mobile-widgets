@@ -29,7 +29,7 @@ class RecoveryTest {
     @Test fun writeReadRoundTrip() {val s=Memory();val j=RecoveryJournal(s);val r=prepared(j);assertEquals(r,RecoveryJournal(s).load())}
     @Test fun failedAtomicReplacementPreservesPrevious() {val s=Memory();val j=RecoveryJournal(s);val r=prepared(j);s.failWrite=true;rejected{j.advance(r,RecoveryPhase.UploadIntent,{true})};s.failWrite=false;assertEquals(r,j.load())}
     @Test fun corruptJournalFailsClosedAndRemains() {val s=Memory();s.bytes="broken".toByteArray();rejected{RecoveryJournal(s).load()};assertNotNull(s.bytes)}
-    @Test fun unsupportedVersionRemainsBlocked() {val s=Memory();val j=RecoveryJournal(s);prepared(j);s.bytes=String(s.bytes!!).replace("\"schema\":1","\"schema\":2").toByteArray();rejected{j.load()};assertNotNull(s.bytes)}
+    @Test fun unsupportedVersionRemainsBlocked() {val s=Memory();val j=RecoveryJournal(s);prepared(j);s.bytes=String(s.bytes!!).replace("\"schema\":2","\"schema\":3").toByteArray();rejected{j.load()};assertNotNull(s.bytes)}
     @Test fun encryptionFailureCannotDispatchIntent() {val s=Memory();s.failWrite=true;rejected{RecoveryJournal(s).begin(a,req,"time_in"){true}};assertNull(s.bytes)}
     @Test fun unavailableStorageFailsClosed() {val s=Memory();s.failRead=true;rejected{RecoveryJournal(s).begin(a,req,"time_in"){true}}}
     @Test fun duplicateWritersCannotOverwrite() {val j=RecoveryJournal(Memory());val r=j.begin(a,req,"time_in"){true};rejected{j.begin(b,upload,"time_out"){true}};assertEquals(r,j.load())}

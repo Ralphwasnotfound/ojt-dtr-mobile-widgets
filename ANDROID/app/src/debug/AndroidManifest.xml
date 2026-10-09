@@ -7,5 +7,7 @@
             android:name="androidx.compose.ui.tooling.PreviewActivity"
             android:exported="false"
             tools:replace="android:exported" />
+        <activity android:name="ph.edu.bsit.tcc.ojtdtr.recovery.RecoveryReviewActivity"
+            android:exported="false" />
     </application>
 </manifest>
