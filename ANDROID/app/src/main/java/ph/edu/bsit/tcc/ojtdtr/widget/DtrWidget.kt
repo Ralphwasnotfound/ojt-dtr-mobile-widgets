@@ -44,7 +44,7 @@ class DtrWidget : GlanceAppWidget() {
                     Text("Completed: ${view.completed ?: "Unavailable"}", style = TextStyle(color = ColorProvider(Color.White)))
                     Text("Remaining: ${view.remaining ?: "Unavailable"}", style = TextStyle(color = ColorProvider(Color.White)))
                     Text("Status: ${view.status ?: "Unavailable"}", style = TextStyle(color = ColorProvider(Color.White)))
-                    Text("Last checked (device clock): ${view.checked ?: "Unavailable"}", style = TextStyle(color = ColorProvider(Color.White), fontSize = 11.sp))
+                    Text("Last refresh (Manila, device clock): ${view.checked ?: "Unavailable"}", style = TextStyle(color = ColorProvider(Color.White), fontSize = 11.sp))
                 }
                 Text(view.message, style = TextStyle(color = ColorProvider(Color(0xFFE2B449)), fontSize = 12.sp))
             }

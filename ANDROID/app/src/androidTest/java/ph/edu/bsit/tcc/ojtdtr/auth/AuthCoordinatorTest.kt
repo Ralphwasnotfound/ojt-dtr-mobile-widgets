@@ -26,6 +26,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.combine
+import ph.edu.bsit.tcc.ojtdtr.widget.WidgetPublication
+import ph.edu.bsit.tcc.ojtdtr.widget.WidgetPresentation
+import ph.edu.bsit.tcc.ojtdtr.attendance.AttendanceState
+import ph.edu.bsit.tcc.ojtdtr.attendance.Manila
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -406,6 +414,108 @@ class AuthCoordinatorTest {
         }
         await(owner, AccountState.SignedOut)
         assertEquals(ph.edu.bsit.tcc.ojtdtr.attendance.AttendanceState.AccountChanged, owner.attendance.state.value)
+    }
+
+    @Test fun successfulStudentReplacementWhileWidgetPublicationBlockedCannotRestoreStudentA() = runBlocking<Unit> {
+        val studentB = "00000000-0000-4000-8000-000000000002"
+        val active = AtomicReference(userId)
+        val reads = AtomicInteger()
+        val exchanges = AtomicInteger()
+        fun currentUser() = UserInfo(aud = "authenticated", id = active.get())
+        fun currentSession() = UserSession(accessToken = "synthetic-access-${active.get()}",
+            refreshToken = "synthetic-refresh-${active.get()}", expiresIn = 3600, tokenType = "bearer",
+            user = currentUser(), expiresAt = Clock.System.now() + 3600.seconds)
+        SecureSessionManager(storage).saveSession(currentSession())
+        val transport = MockEngine { request ->
+            val uid = active.get()
+            val body = when {
+                request.url.encodedPath.endsWith("/user") -> Json.encodeToString(currentUser())
+                request.url.encodedPath.endsWith("/token") -> {
+                    exchanges.incrementAndGet(); Json.encodeToString(currentSession())
+                }
+                request.url.encodedPath.endsWith("/profiles") -> {
+                    check(request.url.parameters["id"] == "eq.$uid")
+                    """[{"id":"$uid","role":"student","status":"approved","required_hours":486}]"""
+                }
+                request.url.encodedPath.endsWith("/rpc/attendance_summary") -> {
+                    reads.incrementAndGet()
+                    val completed = if (uid == userId) 7200 else 14400
+                    val day = java.time.Instant.now().atZone(Manila).toLocalDate()
+                    """[{"open_session_id":null,"open_time_in":null,"open_session_ordinal":null,
+                        "started_today":false,"starts_today":0,"next_action":"time_in","today_sessions":[],
+                        "completed_seconds":$completed,"today_completed_seconds":0,"completed_sessions":2,"days_present":1,
+                        "manila_day":"$day"}]"""
+                }
+                request.url.encodedPath.endsWith("/logout") -> ""
+                else -> error("Unexpected synthetic replacement endpoint")
+            }
+            respond(body, HttpStatusCode.OK, headersOf("Content-Type", "application/json"))
+        }
+        val owner = withContext(Dispatchers.Main) { coordinator(transport) }
+        await(owner, AccountState.StudentApproved)
+        val lifecycle = withContext(Dispatchers.Main) {
+            owner.registerAttendanceLifecycle().also { owner.attendanceForeground(it, true) }
+        }
+        suspend fun fresh() = withTimeout(15000) {
+            owner.attendance.state.first { it is AttendanceState.Fresh }; owner.awaitAttendanceIdle()
+        }
+        fresh()
+        val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>()
+        val publishedB = CompletableDeferred<Unit>()
+        val host = mutableMapOf<Int, WidgetPresentation>()
+        val order = mutableListOf<String>()
+        var blocked = false
+        lateinit var publisher: WidgetPublication<Int>
+        val observer = withContext(Dispatchers.Main) {
+            publisher = WidgetPublication(current = { owner.widgetPresentation() }, instances = { listOf(1, 2) },
+                update = { id ->
+                    val captured = publisher.presentation.value
+                    if (!blocked && captured.completed == "2h 0m") {
+                        blocked = true; entered.complete(Unit)
+                        withContext(NonCancellable) { release.await() }
+                    }
+                    host[id] = captured
+                    order += "$id:${captured.completed}"
+                    if (host.size == 2 && host.values.all { it.completed == "4h 0m" }) publishedB.complete(Unit)
+                })
+            CoroutineScope(Dispatchers.Main).launch {
+                publisher.observe(combine(owner.state, owner.attendance.state) { _, _ -> Unit })
+            }
+        }
+        try {
+            withTimeout(10000) { entered.await() }
+            withContext(Dispatchers.Main) { owner.logout() }
+            withTimeout(10000) { publisher.presentation.first { it.completed == null } }
+            await(owner, AccountState.SignedOut)
+            assertNull(storage.read("session"))
+            active.set(studentB)
+            val launched = CompletableDeferred<Unit>()
+            withContext(Dispatchers.Main) { owner.signIn { launched.complete(Unit) } }
+            withTimeout(10000) { launched.await() }
+            withContext(Dispatchers.Main) { owner.callback("${CallbackPolicy.URI_VALUE}?code=synthetic-student-b-code") }
+            await(owner, AccountState.StudentApproved); fresh()
+            withContext(Dispatchers.Main) { assertEquals("4h 0m", owner.widgetPresentation().completed) }
+            assertEquals(studentB, SecureSessionManager(storage).loadSession()!!.user!!.id)
+            assertEquals(1, exchanges.get()); assertNull(storage.read("pkce"))
+            assertFalse(release.isCompleted)
+            val beforeRelease = reads.get()
+            release.complete(Unit)
+            withTimeout(10000) { publishedB.await() }
+            withContext(Dispatchers.Main) {
+                assertEquals("4h 0m", publisher.presentation.value.completed)
+                assertEquals("482h 0m", publisher.presentation.value.remaining)
+                assertEquals(setOf(1, 2), host.keys)
+                assertTrue(host.values.all { it.completed == "4h 0m" })
+                val firstB = order.indexOfFirst { it.endsWith(":4h 0m") }
+                assertTrue(firstB >= 0)
+                assertFalse(order.drop(firstB).any { it.endsWith(":2h 0m") })
+            }
+            assertEquals(beforeRelease, reads.get())
+            assertEquals(AccountState.StudentApproved, owner.state.value)
+        } finally {
+            release.complete(Unit); observer.cancelAndJoin()
+            withContext(Dispatchers.Main) { owner.disposeAttendanceLifecycle(lifecycle) }
+        }
     }
 
 }
