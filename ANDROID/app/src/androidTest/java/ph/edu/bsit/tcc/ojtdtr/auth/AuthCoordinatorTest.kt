@@ -557,7 +557,7 @@ class AuthCoordinatorTest {
         val owner = withContext(Dispatchers.Main) { coordinator(engine(profile())) }
         await(owner, AccountState.StudentApproved)
         val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>(); val done = CompletableDeferred<Unit>()
-        val proofRoot = File(root, "device-proof")
+        val proofRoot = File(root, "native-proof/device-proof")
         val camera = object : ph.edu.bsit.tcc.ojtdtr.proof.ProofCamera {
             override suspend fun capture(file: File) {
                 entered.complete(Unit)
@@ -571,8 +571,8 @@ class AuthCoordinatorTest {
         }
         val proof = withContext(Dispatchers.Main) {
             val ticket = owner.proofTicket()!!
-            ph.edu.bsit.tcc.ojtdtr.proof.ProofSession(CoroutineScope(Dispatchers.Main), proofRoot, camera, location,
-                { owner.currentProof(ticket) }, { owner.revalidateProof(ticket) }, { 1000 }).also {
+            ph.edu.bsit.tcc.ojtdtr.proof.ProofSession(CoroutineScope(Dispatchers.Main), proofRoot, root, camera, location,
+                { owner.currentProof(ticket) }, { owner.revalidateProof(ticket) }, { 1000 }, { it.isFile && it.length() > 0 }).also {
                 owner.registerProofCancellation(ticket, it::close)
                 it.capture(ph.edu.bsit.tcc.ojtdtr.proof.Permission.Granted)
             }
@@ -580,11 +580,146 @@ class AuthCoordinatorTest {
         try {
             withTimeout(10000) { entered.await() }
             withContext(Dispatchers.Main) { owner.logout(); assertTrue(proof.state.value.closed) }
-            release.complete(Unit); withTimeout(10000) { done.await() }
+            release.complete(Unit); withTimeout(10000) { done.await(); proof.awaitOperations() }
             withContext(Dispatchers.Main) { assertFalse(proof.state.value.captured); assertEquals(0, proofRoot.walkTopDown().filter { it.isFile }.count()) }
             await(owner, AccountState.SignedOut)
         } finally { release.complete(Unit); withContext(Dispatchers.Main) { proof.close() } }
     }
+
+    private suspend fun proofWithdrawalDuringBlockedWork(operation: String, withdrawal: String) {
+        val studentB = "00000000-0000-4000-8000-000000000002"
+        val active = AtomicReference(userId)
+        val status = AtomicReference("approved")
+        fun currentUser() = user.copy(id = active.get())
+        fun currentSession() = session().copy(user = currentUser(), accessToken = "synthetic-proof-${active.get()}")
+        SecureSessionManager(storage).saveSession(currentSession())
+        val transport = MockEngine { request ->
+            val uid = active.get()
+            val body = when {
+                request.url.encodedPath.endsWith("/user") -> Json.encodeToString(currentUser())
+                request.url.encodedPath.endsWith("/token") -> Json.encodeToString(currentSession())
+                request.url.encodedPath.endsWith("/profiles") -> {
+                    check(request.url.parameters["id"] == "eq.$uid")
+                    """[{"id":"$uid","role":"student","status":"${status.get()}","required_hours":486}]"""
+                }
+                request.url.encodedPath.endsWith("/logout") -> ""
+                else -> error("Unexpected synthetic proof endpoint")
+            }
+            respond(body, HttpStatusCode.OK, headersOf("Content-Type", "application/json"))
+        }
+        val owner = withContext(Dispatchers.Main) { coordinator(transport) }
+        await(owner, AccountState.StudentApproved)
+        val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>()
+        val proofRoot = File(root, "native-proof/old-proof")
+        val lateCallback = CompletableDeferred<Unit>()
+        var block = false
+        val camera = object : ph.edu.bsit.tcc.ojtdtr.proof.ProofCamera {
+            override suspend fun capture(file: File) {
+                if (block && operation == "camera") {
+                    entered.complete(Unit); withContext(NonCancellable) {
+                        release.await(); file.parentFile!!.mkdirs(); file.writeBytes(byteArrayOf(1,2))
+                        lateCallback.complete(Unit)
+                    }
+                } else { file.parentFile!!.mkdirs(); file.writeBytes(byteArrayOf(1,2)) }
+            }
+            override fun stop() = Unit
+        }
+        val location = object : ph.edu.bsit.tcc.ojtdtr.proof.ProofLocation {
+            override suspend fun acquire(): ph.edu.bsit.tcc.ojtdtr.proof.Fix {
+                if (block && operation == "gps") {
+                    entered.complete(Unit)
+                    return withContext(NonCancellable) {
+                        release.await(); lateCallback.complete(Unit)
+                        ph.edu.bsit.tcc.ojtdtr.proof.Fix(14.0,121.0,7f,1000,true)
+                    }
+                }
+                return ph.edu.bsit.tcc.ojtdtr.proof.Fix(14.0,121.0,7f,1000,true)
+            }
+            override fun stop() = Unit
+        }
+        val ticket = withContext(Dispatchers.Main) { owner.proofTicket()!! }
+        val proof = withContext(Dispatchers.Main) {
+            ph.edu.bsit.tcc.ojtdtr.proof.ProofSession(CoroutineScope(Dispatchers.Main), proofRoot, root, camera, location,
+                {owner.currentProof(ticket)}, {owner.revalidateProof(ticket)}, {1000}, {true})
+        }
+        val unregister = withContext(Dispatchers.Main) { owner.registerProofCancellation(ticket, proof::close) }
+        var replacement: ph.edu.bsit.tcc.ojtdtr.proof.ProofSession? = null
+        var unregisterB: (() -> Unit)? = null
+        try {
+            withContext(Dispatchers.Main) {
+                proof.locate(ph.edu.bsit.tcc.ojtdtr.proof.Permission.Granted)
+                proof.awaitOperations(); assertEquals(7f, proof.state.value.accuracy)
+                if (operation == "gps") {
+                    proof.capture(ph.edu.bsit.tcc.ojtdtr.proof.Permission.Granted)
+                    proof.awaitOperations(); assertTrue(proof.state.value.captured)
+                }
+                block = true
+                if (operation == "camera") proof.capture(ph.edu.bsit.tcc.ojtdtr.proof.Permission.Granted)
+                else proof.locate(ph.edu.bsit.tcc.ojtdtr.proof.Permission.Granted)
+            }
+            withTimeout(10000) { entered.await() }
+            if (withdrawal == "revocation") {
+                status.set("rejected")
+                withContext(Dispatchers.Main) { assertFalse(owner.revalidateProof(ticket)) }
+            } else {
+                withContext(Dispatchers.Main) { owner.logout() }
+                await(owner, AccountState.SignedOut)
+            }
+            withContext(Dispatchers.Main) {
+                assertTrue(proof.state.value.closed); assertFalse(owner.currentProof(ticket))
+                assertNull(proof.previewFile()); assertNull(proof.state.value.accuracy)
+            }
+            if (withdrawal == "replacement") {
+                active.set(studentB)
+                val launched = CompletableDeferred<Unit>()
+                withContext(Dispatchers.Main) { owner.signIn { launched.complete(Unit) } }
+                withTimeout(10000) { launched.await() }
+                withContext(Dispatchers.Main) { owner.callback("${CallbackPolicy.URI_VALUE}?code=synthetic-proof-student-b") }
+                await(owner, AccountState.StudentApproved)
+                assertEquals(studentB, SecureSessionManager(storage).loadSession()!!.user!!.id)
+                withContext(Dispatchers.Main) {
+                    val newTicket = owner.proofTicket()!!
+                    assertNotSame(ticket, newTicket); assertFalse(owner.currentProof(ticket)); assertTrue(owner.currentProof(newTicket))
+                    val freshCamera = object : ph.edu.bsit.tcc.ojtdtr.proof.ProofCamera {
+                        override suspend fun capture(file: File) { file.writeBytes(byteArrayOf(3,4)) }
+                        override fun stop() = Unit
+                    }
+                    val freshLocation = object : ph.edu.bsit.tcc.ojtdtr.proof.ProofLocation {
+                        override suspend fun acquire() = ph.edu.bsit.tcc.ojtdtr.proof.Fix(15.0,122.0,11f,1000,false)
+                        override fun stop() = Unit
+                    }
+                    replacement = ph.edu.bsit.tcc.ojtdtr.proof.ProofSession(CoroutineScope(Dispatchers.Main), File(root,"native-proof/new-proof"),root,
+                        freshCamera,freshLocation,{owner.currentProof(newTicket)},{owner.revalidateProof(newTicket)},{1000},{true})
+                    val newer = replacement!!
+                    unregisterB = owner.registerProofCancellation(newTicket, newer::close)
+                    assertFalse(newer.state.value.captured); assertNull(newer.state.value.accuracy); assertNull(newer.previewFile())
+                    newer.capture(ph.edu.bsit.tcc.ojtdtr.proof.Permission.Granted); newer.awaitOperations()
+                    newer.locate(ph.edu.bsit.tcc.ojtdtr.proof.Permission.Granted); newer.awaitOperations()
+                    assertArrayEquals(byteArrayOf(3,4), newer.previewFile()!!.readBytes()); assertEquals(11f,newer.state.value.accuracy)
+                }
+            }
+            assertFalse(release.isCompleted)
+            release.complete(Unit)
+            withTimeout(10000) { lateCallback.await(); proof.awaitOperations() } // Caller finally has completed, not merely fake callback.
+            withContext(Dispatchers.Main) {
+                assertTrue(proof.state.value.closed); assertFalse(proof.state.value.captured); assertNull(proof.state.value.accuracy)
+                assertEquals(0,proofRoot.walkTopDown().filter {it.isFile}.count())
+                replacement?.let {
+                    assertTrue(it.allowed()); assertArrayEquals(byteArrayOf(3,4),it.previewFile()!!.readBytes())
+                    assertEquals(11f,it.state.value.accuracy); assertEquals(false,it.state.value.precise)
+                    assertEquals(AccountState.StudentApproved,owner.state.value)
+                }
+            }
+        } finally {
+            release.complete(Unit)
+            withContext(Dispatchers.Main) { proof.close(); proof.awaitOperations(); replacement?.close(); unregister(); unregisterB?.invoke() }
+        }
+    }
+    @Test fun approvedStudentReplacementDuringCapturePreservesNewProof() = runBlocking<Unit> { proofWithdrawalDuringBlockedWork("camera","replacement") }
+    @Test fun approvedStudentReplacementDuringGpsPreservesNewProof() = runBlocking<Unit> { proofWithdrawalDuringBlockedWork("gps","replacement") }
+    @Test fun logoutDuringGpsRejectsLateFix() = runBlocking<Unit> { proofWithdrawalDuringBlockedWork("gps","logout") }
+    @Test fun revocationDuringGpsRejectsLateFix() = runBlocking<Unit> { proofWithdrawalDuringBlockedWork("gps","revocation") }
+    @Test fun revocationDuringCaptureDeletesLateFile() = runBlocking<Unit> { proofWithdrawalDuringBlockedWork("camera","revocation") }
 
     @Test fun manualSamsungDeviceOnlyProofHardware() = runBlocking<Unit> {
         org.junit.Assume.assumeTrue(androidx.test.platform.app.InstrumentationRegistry.getArguments().getString("proofManual") == "true")

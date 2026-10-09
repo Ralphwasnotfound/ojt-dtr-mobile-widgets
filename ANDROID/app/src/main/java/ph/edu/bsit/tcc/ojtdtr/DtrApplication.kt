@@ -16,7 +16,7 @@ class DtrApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         // Cache is excluded from backup; discard orphan proof files after process restart.
-        proofStorageReady = try { java.io.File(cacheDir, "native-proof").deleteRecursively() } catch (_: Exception) { false }
+        proofStorageReady = ph.edu.bsit.tcc.ojtdtr.proof.cleanupProofCache(cacheDir)
     }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val publication = WidgetPublication<GlanceId>(

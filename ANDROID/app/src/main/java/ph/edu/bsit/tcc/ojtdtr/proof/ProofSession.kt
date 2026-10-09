@@ -24,9 +24,10 @@ internal class ProofFailure(val problem: ProofProblem) : Exception()
 
 /** Screen-owned Main-dispatcher state. No SDK, upload, mutation, coordinate UI or durable cache. */
 internal class ProofSession(
-    parent: CoroutineScope, private val directory: File, private val camera: ProofCamera,
+    parent: CoroutineScope, private val directory: File, private val cache: File, private val camera: ProofCamera,
     private val location: ProofLocation, private val current: () -> Boolean,
     private val revalidate: suspend () -> Boolean, private val now: () -> Long,
+    private val validImage: (File) -> Boolean,
     private val deadlineMillis: Long = 20_000,
 ) {
     private val job = SupervisorJob(parent.coroutineContext[Job])
@@ -38,8 +39,19 @@ internal class ProofSession(
     private var revision = 0L
     private var work: Job? = null
     private var closed = false
-    fun allowed(): Boolean = !closed && current()
+    fun allowed(): Boolean = !closed && current() && proofDirectoryOwned(cache, directory)
     fun previewFile(): File? = if (allowed()) photo else null
+    /** Joins caller finally blocks, including non-cooperative operations canceled by close. */
+    internal suspend fun awaitOperations() { job.children.toList().joinAll() }
+    fun rejectImage(expected: File) {
+        if (!allowed()) { close(); return }
+        if (photo !== expected) return
+        revision++; work?.cancel(); camera.stop(); location.stop()
+        delete(expected); photo = null; fix = null
+        mutable.value = ProofState(problem = if (mutable.value.problem == ProofProblem.CleanupFailed)
+            ProofProblem.CleanupFailed else ProofProblem.CaptureFailed)
+    }
+    private fun imageValid(file: File): Boolean = readProofImage(file, validImage) == true
     fun permission(value: Permission) {
         if (!allowed()) { close(); return }
         if (value != Permission.Granted) mutable.value = mutable.value.copy(problem =
@@ -55,17 +67,18 @@ internal class ProofSession(
         work = scope.launch {
             var output: File? = null
             try {
-                check(directory.mkdirs() || directory.isDirectory)
+                if (!proofDirectoryOwned(cache, directory) || (!directory.mkdirs() && !directory.isDirectory)) throw ProofFailure(ProofProblem.CaptureFailed)
                 output = File(directory, "${UUID.randomUUID()}.jpg")
                 withTimeout(deadlineMillis) { camera.capture(output) }
                 if (!allowed() || revision != generation) return@launch
-                check(output.isFile && output.length() > 0)
+                if (!imageValid(output)) throw ProofFailure(ProofProblem.CaptureFailed)
                 photo = output; output = null
                 mutable.value = mutable.value.copy(captured = true)
             } catch (_: TimeoutCancellationException) { fail(generation, ProofProblem.Timeout) }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: ProofFailure) { fail(generation, failure.problem) }
-            catch (_: Exception) { fail(generation, ProofProblem.CaptureFailed) }
+            catch (_: java.io.IOException) { fail(generation, ProofProblem.CaptureFailed) }
+            catch (_: SecurityException) { fail(generation, ProofProblem.CaptureFailed) }
             finally {
                 output?.let { delete(it) }
                 if (revision == generation && !closed) mutable.value = mutable.value.copy(busy = false)
@@ -103,7 +116,10 @@ internal class ProofSession(
     }
     fun confirm() {
         if (!allowed()) { close(); return }
-        if (work?.isActive == true || photo?.isFile != true || fix?.valid(now()) != true) {
+        if (work?.isActive == true) return
+        val captured = photo
+        if (captured != null && !imageValid(captured)) { rejectImage(captured); return }
+        if (captured == null || fix?.valid(now()) != true) {
             mutable.value = mutable.value.copy(problem = ProofProblem.LocationUnavailable); return
         }
         val generation = ++revision
@@ -113,13 +129,15 @@ internal class ProofSession(
                 val valid = withTimeout(deadlineMillis) { revalidate() }
                 if (!valid || !allowed()) { close(); return@launch }
                 if (revision != generation) return@launch
+                if (photo !== captured || !imageValid(captured)) { rejectImage(captured); return@launch }
                 if (fix?.valid(now()) != true) { fail(generation, ProofProblem.InvalidLocation); return@launch }
                 photo?.let { delete(it) }; photo = null; fix = null
                 camera.stop(); location.stop()
                 if (mutable.value.problem != ProofProblem.CleanupFailed) mutable.value = ProofState(confirmed = true)
             } catch (_: TimeoutCancellationException) { fail(generation, ProofProblem.Timeout) }
             catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { fail(generation, ProofProblem.Authorization) }
+            catch (_: java.io.IOException) { fail(generation, ProofProblem.Authorization) }
+            catch (_: SecurityException) { fail(generation, ProofProblem.Authorization) }
             finally { if (!closed && revision == generation) mutable.value = mutable.value.copy(busy = false) }
         }
     }
@@ -128,7 +146,7 @@ internal class ProofSession(
         if (revision == generation) mutable.value = mutable.value.copy(problem = problem)
     }
     private fun delete(file: File) {
-        try { if (file.exists() && !file.delete()) mutable.value = mutable.value.copy(problem = ProofProblem.CleanupFailed) }
+        try { if (!deleteProofImage(cache, file)) mutable.value = mutable.value.copy(problem = ProofProblem.CleanupFailed) }
         catch (_: Exception) { mutable.value = mutable.value.copy(problem = ProofProblem.CleanupFailed) }
     }
     fun close() {
@@ -137,7 +155,7 @@ internal class ProofSession(
         mutable.value = ProofState(closed = true)
         try { camera.stop() } catch (_: Exception) { }
         try { location.stop() } catch (_: Exception) { }
-        try { if (directory.exists() && !directory.deleteRecursively()) mutable.value = mutable.value.copy(problem = ProofProblem.CleanupFailed) }
+        try { if (!cleanupProofSession(cache, directory)) mutable.value = mutable.value.copy(problem = ProofProblem.CleanupFailed) }
         catch (_: Exception) { mutable.value = mutable.value.copy(problem = ProofProblem.CleanupFailed) }
     }
 }

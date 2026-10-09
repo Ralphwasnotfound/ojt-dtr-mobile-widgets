@@ -44,23 +44,23 @@ internal class NativeCamera(private val context: Context) : ProofCamera {
         val image = capture
         if (image == null) { continuation.resumeWithException(ProofFailure(ProofProblem.CameraUnavailable)); return@suspendCancellableCoroutine }
         val generation = revision
-        continuation.invokeOnCancellation { file.delete() }
+        continuation.invokeOnCancellation { deleteProofImage(context.cacheDir, file) }
         try {
             image.takePicture(ImageCapture.OutputFileOptions.Builder(file).build(), ContextCompat.getMainExecutor(context),
                 object : ImageCapture.OnImageSavedCallback {
                     override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                         if (generation != revision || !continuation.isActive) {
-                            file.delete()
+                            deleteProofImage(context.cacheDir, file)
                             if (continuation.isActive) continuation.resumeWithException(ProofFailure(ProofProblem.CaptureFailed))
                         } else continuation.resume(Unit)
                     }
                     override fun onError(error: ImageCaptureException) {
-                        file.delete()
+                        deleteProofImage(context.cacheDir, file)
                         if (continuation.isActive) continuation.resumeWithException(ProofFailure(ProofProblem.CaptureFailed))
                     }
                 })
         } catch (_: Exception) {
-            file.delete()
+            deleteProofImage(context.cacheDir, file)
             if (continuation.isActive) continuation.resumeWithException(ProofFailure(ProofProblem.CaptureFailed))
         }
     }

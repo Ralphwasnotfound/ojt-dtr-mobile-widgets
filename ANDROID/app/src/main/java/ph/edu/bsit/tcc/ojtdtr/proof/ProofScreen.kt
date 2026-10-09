@@ -45,8 +45,8 @@ internal fun ProofScreen(authentication: AuthCoordinator, onBack: () -> Unit) {
     val camera = remember { NativeCamera(context.applicationContext) }
     val location = remember { NativeLocation(context.applicationContext) }
     val session = remember(ticket) {
-        ProofSession(scope, File(context.cacheDir, "native-proof/${UUID.randomUUID()}"), camera, location,
-            { authentication.currentProof(ticket) }, { authentication.revalidateProof(ticket) }, SystemClock::elapsedRealtime)
+        ProofSession(scope, File(context.cacheDir, "native-proof/${UUID.randomUUID()}"), context.cacheDir, camera, location,
+            { authentication.currentProof(ticket) }, { authentication.revalidateProof(ticket) }, SystemClock::elapsedRealtime, ProofImage::valid)
     }
     val state by session.state.collectAsState()
     val previewView = remember { PreviewView(context).apply { implementationMode = PreviewView.ImplementationMode.COMPATIBLE } }
@@ -97,25 +97,10 @@ internal fun ProofScreen(authentication: AuthCoordinator, onBack: () -> Unit) {
             }
             Button(onClick = { session.capture(cameraPermission) }, enabled = !state.busy) { Text("Capture") }
         } else if (state.captured) {
-            val bitmap = remember(state.captured, session) {
-                session.previewFile()?.let { file ->
-                    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    android.graphics.BitmapFactory.decodeFile(file.path, bounds)
-                    val options = android.graphics.BitmapFactory.Options().apply {
-                        inSampleSize = 1
-                        while (bounds.outWidth / inSampleSize > 800 || bounds.outHeight / inSampleSize > 800) inSampleSize *= 2
-                    }
-                    android.graphics.BitmapFactory.decodeFile(file.path, options)?.let { image ->
-                        val exif = androidx.exifinterface.media.ExifInterface(file.path)
-                        val orientation = exif.getAttributeInt(androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION, 1)
-                        val matrix = android.graphics.Matrix()
-                        if (orientation in listOf(2, 4, 5, 7)) matrix.postScale(-1f, 1f)
-                        val angle = when (orientation) { 3, 4 -> 180f; 5, 6 -> 90f; 7, 8 -> 270f; else -> 0f }
-                        matrix.postRotate(angle)
-                        android.graphics.Bitmap.createBitmap(image, 0, 0, image.width, image.height, matrix, true)
-                    }
-                }
-            }
+            val file = session.previewFile()
+            val bitmap = remember(file) { file?.let(ProofImage::load) }
+            DisposableEffect(bitmap) { onDispose { bitmap?.recycle() } }
+            LaunchedEffect(file, bitmap) { if (file != null && bitmap == null) session.rejectImage(file) }
             bitmap?.let { Image(it.asImageBitmap(), "Captured selfie", Modifier.fillMaxWidth().height(240.dp)) }
             Text("Selfie captured in private temporary storage")
         }
@@ -135,7 +120,7 @@ internal fun ProofScreen(authentication: AuthCoordinator, onBack: () -> Unit) {
             ProofProblem.PermissionDenied -> "Permission denied. You can try again."
             ProofProblem.SettingsRequired -> "Permission is blocked. You can enable it in app settings."
             ProofProblem.CameraUnavailable -> "Front camera unavailable or disconnected. Reopen this screen to retry."
-            ProofProblem.CaptureFailed -> "Capture failed. Try again."
+            ProofProblem.CaptureFailed -> "Selfie could not be read or captured. Capture a new selfie to retry."
             ProofProblem.LocationUnavailable -> "Location unavailable. Check foreground permission and device location services."
             ProofProblem.InvalidLocation -> "Location fix is invalid or too old. Acquire a new fix."
             ProofProblem.Timeout -> "Request timed out. Try again."
