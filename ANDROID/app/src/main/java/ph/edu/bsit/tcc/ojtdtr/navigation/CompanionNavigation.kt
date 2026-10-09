@@ -24,6 +24,7 @@ private enum class Destination(val route: String) {
     Welcome("welcome"),
     Foundation("foundation"),
     Proof("proof"),
+    AttendanceProof("attendance-proof"),
 }
 
 @Composable
@@ -66,6 +67,7 @@ fun CompanionNavigation(authentication: AuthCoordinator, onGoogle: (String) -> U
                 onCancel = authentication::cancelAuthentication, onRetry = authentication::retry,
                 onSignOut = authentication::logout, onRefresh = authentication::refreshProfile,
                 attendance = attendance, onAttendanceRefresh = authentication::refreshAttendance,
+                onAttendanceProof = { if (authentication.permittedAttendanceAction() != null) controller.navigate(Destination.AttendanceProof.route) { launchSingleTop = true } },
                 onProof = { if (authentication.proofTicket() != null) controller.navigate(Destination.Proof.route) { launchSingleTop = true } },
                 onWeb = { destination ->
                     WebDestinations.urlFor(authentication.state.value, destination)?.let(onWeb)
@@ -75,6 +77,9 @@ fun CompanionNavigation(authentication: AuthCoordinator, onGoogle: (String) -> U
         }
         composable(Destination.Proof.route) {
             ph.edu.bsit.tcc.ojtdtr.proof.ProofScreen(authentication) { controller.popBackStack() }
+        }
+        composable(Destination.AttendanceProof.route) {
+            ph.edu.bsit.tcc.ojtdtr.proof.ProofScreen(authentication, attendanceMode = true) { controller.popBackStack() }
         }
         composable(Destination.Foundation.route) {
             FoundationScreen(onBack = { controller.popBackStack() })

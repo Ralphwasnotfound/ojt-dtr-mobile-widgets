@@ -27,6 +27,28 @@ class ProofSessionTest {
         val session = ProofSession(this, File(root,"native-proof/session"), root, camera, location, { true }, { true }, { 1000 }, { it.isFile && it.length() > 0 })
         try { block(session, camera, location, root) } finally { session.close(); root.deleteRecursively() }
     }
+    @Test fun confirmedProofTransferredOnceAndDeletedAfterConsumerCompletion() = runBlocking {
+        val root = Files.createTempDirectory("submission-proof-").toFile()
+        val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>()
+        var consumed = 0; var bytes: ByteArray? = null
+        val s = ProofSession(this, File(root,"native-proof/session"), root, Camera(), Location(),
+            { true }, { true }, { 1000 }, { it.isFile && it.length() > 0 },
+            onConfirmed = { proof -> consumed++; bytes = proof.bytes; entered.complete(Unit); release.await() })
+        try {
+            s.capture(Permission.Granted); s.awaitOperations(); s.locate(Permission.Granted); s.awaitOperations()
+            s.confirm(); entered.await(); s.confirm(); assertEquals(1,consumed)
+            release.complete(Unit); s.awaitOperations(); assertTrue(s.state.value.confirmed)
+            assertTrue(bytes!!.all { it == 0.toByte() }); assertEquals(0,root.walkTopDown().count { it.isFile })
+        } finally { s.close(); root.deleteRecursively() }
+    }
+    @Test fun corruptCaptureCannotReachSubmissionConsumer() = runBlocking {
+        val root = Files.createTempDirectory("submission-invalid-").toFile(); var consumed = false
+        val s = ProofSession(this, File(root,"native-proof/session"), root, Camera(), Location(),
+            { true }, { true }, { 1000 }, { false }, onConfirmed = { consumed = true })
+        try { s.capture(Permission.Granted); s.awaitOperations(); s.locate(Permission.Granted); s.awaitOperations()
+            s.confirm(); s.awaitOperations(); assertFalse(consumed); assertFalse(s.state.value.confirmed)
+        } finally { s.close(); root.deleteRecursively() }
+    }
     @Test fun cameraGrantedCapturesAndRetakeDeletesPrivateFile() = runBlocking {
         check { s, _, _, root ->
             s.capture(Permission.Granted); s.awaitOperations(); assertTrue(s.state.value.captured)

@@ -5,6 +5,7 @@ import java.io.IOException
 import java.nio.file.Files
 import org.junit.Assert.*
 import org.junit.Test
+import kotlinx.coroutines.ensureActive
 
 class ProofFilesTest {
     @Test fun expectedImageFailuresBecomeNullButProgrammingFailuresEscape() {
@@ -80,6 +81,68 @@ class ProofFilesTest {
             assertEquals("keep",sentinel.readText())
             assertTrue(cleanupProofCache(cache)); assertEquals("keep",sentinel.readText())
         } finally { cleanupProofCache(cache); cache.deleteRecursively(); other.deleteRecursively() }
+    }
+
+    private class Channel : java.nio.channels.SeekableByteChannel {
+        var bytes: ByteArray? = null
+        var closed = false
+        var length = 3L
+        var readAction: (java.nio.ByteBuffer) -> Int = { it.put(byteArrayOf(1, 2, 3)); 3 }
+        var closeFailure = false
+        override fun read(target: java.nio.ByteBuffer): Int { bytes = target.array(); return readAction(target) }
+        override fun write(source: java.nio.ByteBuffer): Int = error("read only")
+        override fun position() = 0L
+        override fun position(value: Long): java.nio.channels.SeekableByteChannel = this
+        override fun size() = length
+        override fun truncate(size: Long): java.nio.channels.SeekableByteChannel = error("read only")
+        override fun isOpen() = !closed
+        override fun close() { closed = true; if (closeFailure) throw IOException("synthetic close") }
+    }
+    @Test fun failedPartialReadWipesAllocatedBuffer() {
+        val channel = Channel().apply { readAction = { it.put(1.toByte()); throw IOException("synthetic read") } }
+        try { readSubmissionBytes({ channel }); fail() } catch (_: IOException) { }
+        assertTrue(channel.closed); assertTrue(channel.bytes!!.all { it == 0.toByte() })
+    }
+    @Test fun failedCloseWipesFullyReadBuffer() {
+        val channel = Channel().apply { closeFailure = true }
+        try { readSubmissionBytes({ channel }); fail() } catch (_: IOException) { }
+        assertTrue(channel.closed); assertTrue(channel.bytes!!.all { it == 0.toByte() })
+    }
+    @Test fun failedReadAndCloseWipeAndPreserveReadException() {
+        val channel = Channel().apply {
+            closeFailure = true
+            readAction = { it.put(1.toByte()); throw IOException("synthetic read") }
+        }
+        try { readSubmissionBytes({ channel }); fail() } catch (error: IOException) {
+            assertEquals("synthetic read", error.message); assertEquals(1, error.suppressed.size)
+        }
+        assertTrue(channel.bytes!!.all { it == 0.toByte() })
+    }
+    @Test fun cancellationAfterReadBeforeHandoffWipesBuffer() {
+        val job = kotlinx.coroutines.Job()
+        val channel = Channel().apply { readAction = { it.put(byteArrayOf(1, 2, 3)); job.cancel(); 3 } }
+        try { readSubmissionBytes({ channel }, { job.ensureActive() }); fail() }
+        catch (_: kotlinx.coroutines.CancellationException) { }
+        assertTrue(channel.closed); assertTrue(channel.bytes!!.all { it == 0.toByte() })
+    }
+    @Test fun cancellationDuringPartialReadWipesBuffer() {
+        val channel = Channel().apply { readAction = { it.put(1.toByte()); throw kotlinx.coroutines.CancellationException() } }
+        try { readSubmissionBytes({ channel }); fail() } catch (_: kotlinx.coroutines.CancellationException) { }
+        assertTrue(channel.closed); assertTrue(channel.bytes!!.all { it == 0.toByte() })
+    }
+    @Test fun successfulReadHandsOffSameBufferOnlyAfterClose() {
+        val channel = Channel()
+        val result = readSubmissionBytes({ channel })
+        assertTrue(channel.closed); assertSame(channel.bytes, result); assertArrayEquals(byteArrayOf(1, 2, 3), result)
+        result.fill(0)
+    }
+    @Test fun eofAndOversizeFailClosed() {
+        val eof = Channel().apply { readAction = { it.put(1.toByte()); -1 } }
+        try { readSubmissionBytes({ eof }); fail() } catch (_: IOException) { }
+        assertTrue(eof.bytes!!.all { it == 0.toByte() }); assertTrue(eof.closed)
+        val oversized = Channel().apply { length = 5242881 }
+        try { readSubmissionBytes({ oversized }); fail() } catch (_: IOException) { }
+        assertNull(oversized.bytes); assertTrue(oversized.closed)
     }
 
 }

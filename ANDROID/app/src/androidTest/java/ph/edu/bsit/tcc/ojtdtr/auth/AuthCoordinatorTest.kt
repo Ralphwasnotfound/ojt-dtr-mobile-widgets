@@ -371,6 +371,16 @@ class AuthCoordinatorTest {
         assertEquals(1, queries.get()); assertEquals(1, clientCount.get())
         assertTrue(profileQuery.get().contains("id=eq.$userId"))
         assertTrue(profileQuery.get().contains("required_hours"))
+        // Normal coordinator construction can reach only the operation-level disabled adapter.
+        withContext(Dispatchers.Main) {
+            val ticket = owner.proofTicket()!!
+            val submission = owner.createAttendanceSubmission(this, ticket)!!
+            submission.submit(ph.edu.bsit.tcc.ojtdtr.proof.ConfirmedProof(byteArrayOf(1, 2, 3),
+                ph.edu.bsit.tcc.ojtdtr.proof.Fix(14.0, 121.0, 8f, android.os.SystemClock.elapsedRealtime(), true)))
+            submission.awaitOperations()
+            assertEquals(ph.edu.bsit.tcc.ojtdtr.proof.SubmissionState.Disabled, submission.state.value)
+            submission.close()
+        }
         account.set("rejected")
         withContext(kotlinx.coroutines.Dispatchers.Main) { owner.refreshAttendance() }
         withTimeout(10_000) { owner.attendance.state.first { it == ph.edu.bsit.tcc.ojtdtr.attendance.AttendanceState.AccessDenied } }
@@ -720,6 +730,134 @@ class AuthCoordinatorTest {
     @Test fun logoutDuringGpsRejectsLateFix() = runBlocking<Unit> { proofWithdrawalDuringBlockedWork("gps","logout") }
     @Test fun revocationDuringGpsRejectsLateFix() = runBlocking<Unit> { proofWithdrawalDuringBlockedWork("gps","revocation") }
     @Test fun revocationDuringCaptureDeletesLateFile() = runBlocking<Unit> { proofWithdrawalDuringBlockedWork("camera","revocation") }
+
+    /** Real coordinator/SDK leases and profile authorization; mutation adapter is test-only. */
+    private suspend fun realSubmissionBarrier(stage: String, replacement: Boolean) {
+        val studentB = "00000000-0000-4000-8000-000000000002"
+        val active = AtomicReference(userId); val status = AtomicReference("approved")
+        fun currentUser() = user.copy(id = active.get())
+        fun currentSession() = session().copy(user = currentUser(), accessToken = "synthetic-submission-${active.get()}")
+        SecureSessionManager(storage).saveSession(currentSession())
+        val transport = MockEngine { request ->
+            val uid = active.get()
+            val body = when {
+                request.url.encodedPath.endsWith("/user") -> Json.encodeToString(currentUser())
+                request.url.encodedPath.endsWith("/token") -> Json.encodeToString(currentSession())
+                request.url.encodedPath.endsWith("/profiles") -> {
+                    check(request.url.parameters["id"] == "eq.$uid")
+                    """[{"id":"$uid","role":"student","status":"${status.get()}","required_hours":486}]"""
+                }
+                request.url.encodedPath.endsWith("/rpc/attendance_summary") ->
+                    """[{"open_session_id":null,"open_time_in":null,"open_session_ordinal":null,"started_today":false,
+                    "starts_today":0,"next_action":"time_in","today_sessions":[],"completed_seconds":0,
+                    "today_completed_seconds":0,"completed_sessions":0,"days_present":0,
+                    "manila_day":"${java.time.LocalDate.now(Manila)}"}]"""
+                request.url.encodedPath.endsWith("/logout") -> ""
+                else -> error("Unexpected synthetic submission endpoint")
+            }
+            respond(body, HttpStatusCode.OK, headersOf("Content-Type", "application/json"))
+        }
+        val owner = withContext(Dispatchers.Main) { coordinator(transport) }
+        await(owner, AccountState.StudentApproved)
+        withContext(Dispatchers.Main) { owner.refreshAttendance(); owner.awaitAttendanceIdle() }
+        val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>(); val returned = CompletableDeferred<Unit>()
+        val successfulOwners = mutableListOf<String>()
+        val calls = mutableListOf<String>()
+        val upload = "00000000-0000-4000-8000-000000000007"
+        val target = "00000000-0000-4000-8000-000000000008"
+        val official = java.time.Instant.now()
+        suspend fun before(uid: String, operation: String) {
+            calls += "$uid:$operation"
+            if (uid == userId && stage == "receipt" && operation == "finalize") throw java.io.IOException()
+            if (uid == userId && operation == stage) withContext(NonCancellable) {
+                entered.complete(Unit); release.await(); returned.complete(Unit)
+            }
+        }
+        fun fakeBackend(uid: String) = object : ph.edu.bsit.tcc.ojtdtr.proof.ProofBackend {
+            fun row() = """{"id":"00000000-0000-4000-8000-000000000009","upload_id":"$upload",
+                "attendance_session_id":"$target","student_uid":"$uid","photo_path":"$uid/$target/$upload/proof",
+                "action_type":"time_in","latitude":14,"longitude":121,"accuracy":8,
+                "official_punch_at":"$official","attached_at":"$official"}"""
+            override suspend fun prepare(requestId: String, action: ph.edu.bsit.tcc.ojtdtr.attendance.AttendanceAction): String {
+                before(uid, "prepare")
+                return """[{"upload_id":"$upload","attendance_session_id":"$target","photo_path":"$uid/$target/$upload/proof",
+                    "expires_at":"${java.time.Instant.now().plusSeconds(3600)}"}]"""
+            }
+            override suspend fun upload(bucket: String, path: String, jpeg: ByteArray) {
+                assertEquals("attendance-proofs", bucket); assertEquals("$uid/$target/$upload/proof", path)
+                before(uid, "upload")
+            }
+            override suspend fun finalize(uploadId: String, fix: ph.edu.bsit.tcc.ojtdtr.proof.Fix): String {
+                before(uid, "finalize"); return row()
+            }
+            override suspend fun receipt(uploadId: String): String { before(uid, "receipt"); return "[${row()}]" }
+        }
+        fun operation(uid: String, ticket: Any) = ph.edu.bsit.tcc.ojtdtr.proof.AttendanceSubmission(
+            CoroutineScope(Dispatchers.Main.immediate), fakeBackend(uid), uid,
+            ph.edu.bsit.tcc.ojtdtr.attendance.AttendanceAction.TimeIn,
+            { owner.currentProof(ticket) }, { owner.permittedAttendanceAction() }, { owner.revalidateProof(ticket) },
+            { successfulOwners += uid; owner.refreshAttendance(); owner.awaitAttendanceIdle() },
+            android.os.SystemClock::elapsedRealtime)
+        fun captured() = ph.edu.bsit.tcc.ojtdtr.proof.ConfirmedProof(byteArrayOf(1, 2, 3),
+            ph.edu.bsit.tcc.ojtdtr.proof.Fix(14.0, 121.0, 8f, android.os.SystemClock.elapsedRealtime(), true))
+        val ticket = withContext(Dispatchers.Main) { owner.proofTicket()!! }
+        val old = withContext(Dispatchers.Main) { operation(userId, ticket) }
+        val unregister = withContext(Dispatchers.Main) { owner.registerProofCancellation(ticket, old::close) }
+        var newer: ph.edu.bsit.tcc.ojtdtr.proof.AttendanceSubmission? = null
+        var unregisterB: (() -> Unit)? = null
+        try {
+            withContext(Dispatchers.Main) {
+                old.submit(captured())
+                if (stage == "receipt") { old.awaitOperations(); old.reconcile() }
+            }
+            withTimeout(10000) { entered.await() }
+            if (replacement) {
+                withContext(Dispatchers.Main) { owner.logout() }; await(owner, AccountState.SignedOut)
+                active.set(studentB)
+                val launch = CompletableDeferred<Unit>()
+                withContext(Dispatchers.Main) { owner.signIn { launch.complete(Unit) } }
+                withTimeout(10000) { launch.await() }
+                withContext(Dispatchers.Main) { owner.callback("${CallbackPolicy.URI_VALUE}?code=synthetic-submission-b") }
+                await(owner, AccountState.StudentApproved)
+                withContext(Dispatchers.Main) {
+                    owner.refreshAttendance(); owner.awaitAttendanceIdle()
+                    val bTicket = owner.proofTicket()!!
+                    assertNotSame(ticket, bTicket); assertFalse(owner.currentProof(ticket)); assertTrue(owner.currentProof(bTicket))
+                    newer = operation(studentB, bTicket)
+                    unregisterB = owner.registerProofCancellation(bTicket, newer!!::close)
+                    newer!!.submit(captured()); newer!!.awaitOperations()
+                    assertEquals(ph.edu.bsit.tcc.ojtdtr.proof.SubmissionState.Completed, newer!!.state.value)
+                }
+            } else {
+                status.set("rejected")
+                withContext(Dispatchers.Main) { assertFalse(owner.revalidateProof(ticket)) }
+            }
+            withContext(Dispatchers.Main) {
+                assertFalse(owner.currentProof(ticket)); assertNull(owner.createAttendanceSubmission(this, ticket))
+            }
+            release.complete(Unit)
+            withTimeout(10000) { returned.await(); old.awaitOperations() }
+            withContext(Dispatchers.Main) {
+                assertNotEquals(ph.edu.bsit.tcc.ojtdtr.proof.SubmissionState.Completed, old.state.value)
+                assertEquals(if (replacement) listOf(studentB) else emptyList<String>(), successfulOwners)
+                if (stage == "prepare") assertFalse(calls.contains("$userId:upload"))
+                if (stage == "upload") assertFalse(calls.contains("$userId:finalize"))
+                if (replacement) {
+                    assertEquals(AccountState.StudentApproved, owner.state.value)
+                    assertEquals(studentB, SecureSessionManager(storage).loadSession()!!.user!!.id)
+                    assertEquals(ph.edu.bsit.tcc.ojtdtr.proof.SubmissionState.Completed, newer!!.state.value)
+                }
+            }
+        } finally {
+            release.complete(Unit)
+            withContext(Dispatchers.Main) { old.close(); old.awaitOperations(); newer?.close(); unregister(); unregisterB?.invoke() }
+        }
+    }
+    @Test fun realCoordinatorRevocationDuringSubmissionPrepare() = runBlocking<Unit> { realSubmissionBarrier("prepare", false) }
+    @Test fun realCoordinatorRevocationDuringSubmissionUpload() = runBlocking<Unit> { realSubmissionBarrier("upload", false) }
+    @Test fun realCoordinatorRevocationDuringSubmissionFinalize() = runBlocking<Unit> { realSubmissionBarrier("finalize", false) }
+    @Test fun realCoordinatorReplacementRejectsLateFinalize() = runBlocking<Unit> { realSubmissionBarrier("finalize", true) }
+    @Test fun realCoordinatorReplacementRejectsLateReceipt() = runBlocking<Unit> { realSubmissionBarrier("receipt", true) }
 
     @Test fun manualSamsungDeviceOnlyProofHardware() = runBlocking<Unit> {
         org.junit.Assume.assumeTrue(androidx.test.platform.app.InstrumentationRegistry.getArguments().getString("proofManual") == "true")

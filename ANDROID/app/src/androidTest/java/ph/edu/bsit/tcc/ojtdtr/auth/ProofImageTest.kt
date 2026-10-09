@@ -65,4 +65,22 @@ class ProofImageTest {
         } finally { cleanupProofCache(cache); cache.deleteRecursively() }
     }
 
+    @Test fun androidBoundedReaderHandsOffJpegAndRejectsSymlink() {
+        val cache = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "reader-test-${UUID.randomUUID()}").apply { mkdirs() }
+        val image = File(cache, "native-proof/session/synthetic.jpg")
+        try {
+            jpeg(image)
+            val bytes = ph.edu.bsit.tcc.ojtdtr.proof.readSubmissionImage(cache, image)
+            try { assertEquals(image.length(), bytes.size.toLong()); assertTrue(bytes.isNotEmpty()) }
+            finally { bytes.fill(0) }
+            val outside = File(cache, "unrelated.jpg"); jpeg(outside)
+            val link = File(image.parentFile, "link.jpg")
+            java.nio.file.Files.createSymbolicLink(link.toPath(), outside.toPath())
+            try { ph.edu.bsit.tcc.ojtdtr.proof.readSubmissionImage(cache, link); fail() }
+            catch (_: java.io.IOException) { }
+            assertTrue(ProofImage.valid(outside)); assertTrue(ph.edu.bsit.tcc.ojtdtr.proof.cleanupProofCache(cache))
+            assertTrue(ProofImage.valid(outside))
+        } finally { ph.edu.bsit.tcc.ojtdtr.proof.cleanupProofCache(cache); cache.deleteRecursively() }
+    }
+
 }

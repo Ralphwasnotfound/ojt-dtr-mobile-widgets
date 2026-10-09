@@ -26,7 +26,7 @@ import ph.edu.bsit.tcc.ojtdtr.navigation.WebDestination
 fun CompanionScreen(account: AccountState, identity: StudentIdentity?, configured: Boolean,
     onGoogle: () -> Unit, onCancel: () -> Unit, onRetry: () -> Unit, onSignOut: () -> Unit,
     attendance: AttendanceState = AttendanceState.AccountChanged, onAttendanceRefresh: () -> Unit = {},
-    onProof: () -> Unit = {}, onRefresh: () -> Unit, onWeb: (WebDestination) -> Unit, onFoundation: () -> Unit) {
+    onProof: () -> Unit = {}, onAttendanceProof: () -> Unit = {}, onRefresh: () -> Unit, onWeb: (WebDestination) -> Unit, onFoundation: () -> Unit) {
     Surface(Modifier.fillMaxSize()) {
         Column(Modifier.safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -42,6 +42,10 @@ fun CompanionScreen(account: AccountState, identity: StudentIdentity?, configure
                         Text(stringResource(R.string.identity_unavailable))
                     Text(stringResource(R.string.today_dtr), style = MaterialTheme.typography.titleMedium)
                     AttendanceSection(attendance, onAttendanceRefresh)
+                    val next = (attendance as? AttendanceState.Fresh)?.summary?.nextAction
+                    if (next != null && next != ph.edu.bsit.tcc.ojtdtr.attendance.AttendanceAction.None)
+                        Button(onClick = onAttendanceProof) { Text(if (next == ph.edu.bsit.tcc.ojtdtr.attendance.AttendanceAction.TimeIn)
+                            "Verify Time In proof (submission disabled)" else "Verify Time Out proof (submission disabled)") }
                     Button(onClick = onProof) { Text("Device-only selfie/location preview") }
                 }
                 AccountState.AdminApproved -> {

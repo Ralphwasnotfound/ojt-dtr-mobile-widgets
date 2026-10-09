@@ -107,6 +107,29 @@ class AuthCoordinator internal constructor(context: Context,
     internal fun currentProof(ticket: Any): Boolean =
         attendance.state.value != AttendanceState.AccessDenied &&
         (ticket as? AttendanceBinding)?.let(::currentAttendance) == true
+    private var pendingSubmission: ph.edu.bsit.tcc.ojtdtr.proof.AttendanceSubmission? = null
+    internal fun permittedAttendanceAction(): AttendanceAction? {
+        if (pendingSubmission?.state?.value in listOf(ph.edu.bsit.tcc.ojtdtr.proof.SubmissionState.Ready, ph.edu.bsit.tcc.ojtdtr.proof.SubmissionState.Preparing,
+                ph.edu.bsit.tcc.ojtdtr.proof.SubmissionState.Uploading, ph.edu.bsit.tcc.ojtdtr.proof.SubmissionState.Finalizing,
+                ph.edu.bsit.tcc.ojtdtr.proof.SubmissionState.OutcomeUnknown)) return null
+        return trustedAttendanceAction()
+    }
+    private fun trustedAttendanceAction(): AttendanceAction? {
+        attendance.reassess()
+        if (proofTicket() == null) return null
+        return (attendance.state.value as? AttendanceState.Fresh)?.summary?.nextAction?.takeIf { it != AttendanceAction.None }
+    }
+    internal fun createAttendanceSubmission(parent: CoroutineScope, ticket: Any): ph.edu.bsit.tcc.ojtdtr.proof.AttendanceSubmission? {
+        val owner = ticket as? AttendanceBinding ?: return null
+        val action = permittedAttendanceAction() ?: return null
+        if (!currentProof(owner)) return null
+        val uid = owner.session.user?.id ?: return null
+        return ph.edu.bsit.tcc.ojtdtr.proof.AttendanceSubmission(parent,
+            ph.edu.bsit.tcc.ojtdtr.proof.DisabledProofBackend, uid, action,
+            { currentProof(owner) }, ::trustedAttendanceAction, { revalidateProof(owner) },
+            { if (currentProof(owner)) { refreshAttendance(); awaitAttendanceIdle() } },
+            android.os.SystemClock::elapsedRealtime).also { pendingSubmission = it }
+    }
     internal fun registerProofCancellation(ticket: Any, cancel: () -> Unit): () -> Unit {
         if (currentProof(ticket)) proofCancellations += cancel else cancel()
         val observer = scope.launch {
@@ -139,6 +162,7 @@ class AuthCoordinator internal constructor(context: Context,
     }
 
     private fun clearAttendance() {
+        pendingSubmission?.close(); pendingSubmission = null
         val cancellations = proofCancellations.toList()
         proofCancellations.clear()
         cancellations.forEach { it() }

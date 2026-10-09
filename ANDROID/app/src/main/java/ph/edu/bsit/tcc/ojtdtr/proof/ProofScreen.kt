@@ -32,7 +32,7 @@ import java.util.UUID
 import ph.edu.bsit.tcc.ojtdtr.auth.AuthCoordinator
 
 @Composable
-internal fun ProofScreen(authentication: AuthCoordinator, onBack: () -> Unit) {
+internal fun ProofScreen(authentication: AuthCoordinator, attendanceMode: Boolean = false, onBack: () -> Unit) {
     val context = LocalContext.current
     if ((context.applicationContext as ph.edu.bsit.tcc.ojtdtr.DtrApplication).proofStorageReady.not()) {
         Column { Text("Private proof cleanup unavailable. Restart the app before trying again."); Button(onClick = onBack) { Text("Back") } }
@@ -42,11 +42,15 @@ internal fun ProofScreen(authentication: AuthCoordinator, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val ticket = remember(authentication) { authentication.proofTicket() }
     if (ticket == null) { LaunchedEffect(Unit) { onBack() }; return }
+    val submission = remember(ticket, attendanceMode) { if (attendanceMode) authentication.createAttendanceSubmission(scope, ticket) else null }
+    if (attendanceMode && submission == null) { LaunchedEffect(Unit) { onBack() }; return }
+    val submissionState = submission?.state?.collectAsState()?.value
     val camera = remember { NativeCamera(context.applicationContext) }
     val location = remember { NativeLocation(context.applicationContext) }
     val session = remember(ticket) {
         ProofSession(scope, File(context.cacheDir, "native-proof/${UUID.randomUUID()}"), context.cacheDir, camera, location,
-            { authentication.currentProof(ticket) }, { authentication.revalidateProof(ticket) }, SystemClock::elapsedRealtime, ProofImage::valid)
+            { authentication.currentProof(ticket) }, { authentication.revalidateProof(ticket) }, SystemClock::elapsedRealtime, ProofImage::valid,
+            onConfirmed = if (submission == null) null else { proof -> submission.submit(proof); submission.awaitOperations() })
     }
     val state by session.state.collectAsState()
     val previewView = remember { PreviewView(context).apply { implementationMode = PreviewView.ImplementationMode.COMPATIBLE } }
@@ -70,13 +74,13 @@ internal fun ProofScreen(authentication: AuthCoordinator, onBack: () -> Unit) {
         val window = (context as? Activity)?.window
         val previouslySecure = window?.attributes?.flags?.and(WindowManager.LayoutParams.FLAG_SECURE) != 0
         window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        val unregister = authentication.registerProofCancellation(ticket, session::close)
+        val unregister = authentication.registerProofCancellation(ticket) { submission?.close(); session.close() }
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE) session.close()
+            if (event == Lifecycle.Event.ON_PAUSE) { submission?.close(); session.close() }
         }
         lifecycle.lifecycle.addObserver(observer)
         onDispose {
-            unregister(); lifecycle.lifecycle.removeObserver(observer); session.close()
+            unregister(); lifecycle.lifecycle.removeObserver(observer); submission?.close(); session.close()
             if (!previouslySecure) window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
     }
@@ -87,8 +91,14 @@ internal fun ProofScreen(authentication: AuthCoordinator, onBack: () -> Unit) {
     }
     Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("Device-only selfie and location preview", style = MaterialTheme.typography.titleLarge)
-        Text("Nothing is uploaded. Attendance is not recorded. Temporary data is deleted when you leave.")
+        Text(if (attendanceMode) "Attendance proof verification" else "Device-only selfie and location preview", style = MaterialTheme.typography.titleLarge)
+        Text(if (attendanceMode) "Native submission is disabled in this phase. No proof is uploaded or attendance recorded." else "Nothing is uploaded. Attendance is not recorded. Temporary data is deleted when you leave.")
+        submissionState?.let { Text(when(it) {
+            SubmissionState.OutcomeUnknown -> "Outcome unknown. Check the authoritative receipt; do not start another attempt."
+            SubmissionState.Disabled -> "Submission blocked by the network safety gate."
+            SubmissionState.Completed -> "Server-confirmed attendance recorded."
+            else -> "Verification: ${it.name}"
+        }) }
         if (cameraPermission == Permission.Granted && !state.captured && !state.confirmed && !state.closed) {
             AndroidView(factory = { previewView }, modifier = Modifier.fillMaxWidth().height(240.dp))
             DisposableEffect(camera, lifecycle) {
@@ -113,9 +123,9 @@ internal fun ProofScreen(authentication: AuthCoordinator, onBack: () -> Unit) {
         Text(if (state.accuracy == null) "Location unavailable" else
             "Location acquired: ${state.accuracy} m accuracy · ${if (state.precise == true) "Precise" else "Approximate"} permission")
         if (state.captured) Button(onClick = session::retake, enabled = !state.busy) { Text("Retake") }
-        Button(onClick = session::confirm, enabled = state.captured && state.accuracy != null && !state.busy) { Text("Confirm device-only preview") }
+        Button(onClick = session::confirm, enabled = state.captured && state.accuracy != null && !state.busy) { Text(if (attendanceMode) "Confirm proof (submission disabled)" else "Confirm device-only preview") }
         if (state.busy) Text("Working…")
-        if (state.confirmed) Text("Device-only preview confirmed. Temporary proof deleted. No attendance recorded.")
+        if (state.confirmed && !attendanceMode) Text("Device-only preview confirmed. Temporary proof deleted. No attendance recorded.")
         state.problem?.let { Text(when (it) {
             ProofProblem.PermissionDenied -> "Permission denied. You can try again."
             ProofProblem.SettingsRequired -> "Permission is blocked. You can enable it in app settings."

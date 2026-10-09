@@ -114,3 +114,38 @@ internal fun deleteProofImage(cache: File, file: File): Boolean {
     catch (_: SecurityException) { false }
     catch (_: java.nio.file.InvalidPathException) { false }
 }
+
+/** Bounded, no-follow leaf read. Trusted parent ownership is checked separately. */
+internal fun readSubmissionImage(cache: File, file: File, checkActive: () -> Unit = {}): ByteArray {
+    val parent = file.parentFile ?: throw java.io.IOException()
+    if (!proofDirectoryOwned(cache, parent)) throw java.io.IOException()
+    return readSubmissionBytes({ java.nio.file.Files.newByteChannel(file.toPath(),
+        setOf(java.nio.file.StandardOpenOption.READ, java.nio.file.LinkOption.NOFOLLOW_LINKS)) }, checkActive)
+}
+
+/** One allocation; ownership transfers only after read, close and cancellation checks succeed. */
+internal fun readSubmissionBytes(open: () -> java.nio.channels.SeekableByteChannel,
+    checkActive: () -> Unit = {}): ByteArray {
+    var allocated: ByteArray? = null
+    var handedOff = false
+    try {
+        checkActive()
+        val result = open().use { channel ->
+            val length = channel.size()
+            if (length !in 1..5242880) throw java.io.IOException()
+            val bytes = ByteArray(length.toInt())
+            allocated = bytes
+            val buffer = java.nio.ByteBuffer.wrap(bytes)
+            while (buffer.hasRemaining()) {
+                checkActive()
+                if (channel.read(buffer) <= 0) throw java.io.IOException()
+            }
+            bytes
+        }
+        checkActive() // A close can fail or cancellation can arrive before handoff.
+        handedOff = true
+        return result
+    } finally {
+        if (!handedOff) allocated?.fill(0)
+    }
+}

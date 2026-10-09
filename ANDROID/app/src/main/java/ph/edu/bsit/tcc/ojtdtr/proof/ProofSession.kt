@@ -29,6 +29,7 @@ internal class ProofSession(
     private val revalidate: suspend () -> Boolean, private val now: () -> Long,
     private val validImage: (File) -> Boolean,
     private val deadlineMillis: Long = 20_000,
+    private val onConfirmed: (suspend (ConfirmedProof) -> Unit)? = null,
 ) {
     private val job = SupervisorJob(parent.coroutineContext[Job])
     private val scope = CoroutineScope(parent.coroutineContext + job)
@@ -131,6 +132,11 @@ internal class ProofSession(
                 if (revision != generation) return@launch
                 if (photo !== captured || !imageValid(captured)) { rejectImage(captured); return@launch }
                 if (fix?.valid(now()) != true) { fail(generation, ProofProblem.InvalidLocation); return@launch }
+                if (onConfirmed != null) {
+                    val bytes = readSubmissionImage(cache, captured) { coroutineContext.ensureActive() }
+                    try { onConfirmed(ConfirmedProof(bytes, fix!!)) } finally { bytes.fill(0) }
+                    if (!allowed() || revision != generation) return@launch
+                }
                 photo?.let { delete(it) }; photo = null; fix = null
                 camera.stop(); location.stop()
                 if (mutable.value.problem != ProofProblem.CleanupFailed) mutable.value = ProofState(confirmed = true)
