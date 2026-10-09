@@ -32,6 +32,7 @@ fun CompanionNavigation(authentication: AuthCoordinator, onGoogle: (String) -> U
     val account by authentication.state.collectAsState()
     val identity by authentication.studentIdentity.collectAsState()
     val attendance by authentication.attendance.state.collectAsState()
+    val recovery by authentication.recovery.collectAsState()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val context = LocalContext.current
     DisposableEffect(lifecycle, authentication, context) {
@@ -66,6 +67,7 @@ fun CompanionNavigation(authentication: AuthCoordinator, onGoogle: (String) -> U
                 onGoogle = { authentication.signIn(onGoogle) },
                 onCancel = authentication::cancelAuthentication, onRetry = authentication::retry,
                 onSignOut = authentication::logout, onRefresh = authentication::refreshProfile,
+                recovery = recovery, onRecoveryCheck = authentication::checkAttendanceRecovery,
                 attendance = attendance, onAttendanceRefresh = authentication::refreshAttendance,
                 onAttendanceProof = { if (authentication.permittedAttendanceAction() != null) controller.navigate(Destination.AttendanceProof.route) { launchSingleTop = true } },
                 onProof = { if (authentication.proofTicket() != null) controller.navigate(Destination.Proof.route) { launchSingleTop = true } },

@@ -25,6 +25,8 @@ import ph.edu.bsit.tcc.ojtdtr.navigation.WebDestination
 @Composable
 fun CompanionScreen(account: AccountState, identity: StudentIdentity?, configured: Boolean,
     onGoogle: () -> Unit, onCancel: () -> Unit, onRetry: () -> Unit, onSignOut: () -> Unit,
+    recovery: ph.edu.bsit.tcc.ojtdtr.recovery.RecoveryStatus = ph.edu.bsit.tcc.ojtdtr.recovery.RecoveryStatus.Hidden,
+    onRecoveryCheck: () -> Unit = {},
     attendance: AttendanceState = AttendanceState.AccountChanged, onAttendanceRefresh: () -> Unit = {},
     onProof: () -> Unit = {}, onAttendanceProof: () -> Unit = {}, onRefresh: () -> Unit, onWeb: (WebDestination) -> Unit, onFoundation: () -> Unit) {
     Surface(Modifier.fillMaxSize()) {
@@ -42,6 +44,16 @@ fun CompanionScreen(account: AccountState, identity: StudentIdentity?, configure
                         Text(stringResource(R.string.identity_unavailable))
                     Text(stringResource(R.string.today_dtr), style = MaterialTheme.typography.titleMedium)
                     AttendanceSection(attendance, onAttendanceRefresh)
+                    when (recovery) {
+                        ph.edu.bsit.tcc.ojtdtr.recovery.RecoveryStatus.Checking -> Text("Checking previous submission")
+                        ph.edu.bsit.tcc.ojtdtr.recovery.RecoveryStatus.Confirmed -> Text("Previous attendance confirmed by server")
+                        ph.edu.bsit.tcc.ojtdtr.recovery.RecoveryStatus.Unresolved,
+                        ph.edu.bsit.tcc.ojtdtr.recovery.RecoveryStatus.Unavailable -> {
+                            Text("Unable to verify a previous submission. New submissions are blocked. Contact an administrator if unresolved.")
+                            Button(onClick = onRecoveryCheck) { Text("Check previous submission") }
+                        }
+                        else -> Unit
+                    }
                     val next = (attendance as? AttendanceState.Fresh)?.summary?.nextAction
                     if (next != null && next != ph.edu.bsit.tcc.ojtdtr.attendance.AttendanceAction.None)
                         Button(onClick = onAttendanceProof) { Text(if (next == ph.edu.bsit.tcc.ojtdtr.attendance.AttendanceAction.TimeIn)

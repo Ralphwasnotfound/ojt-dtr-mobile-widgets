@@ -58,6 +58,7 @@ class AuthCoordinator internal constructor(context: Context,
     attendanceClock: () -> java.time.Instant = java.time.Instant::now,
     attendanceElapsed: () -> Long = android.os.SystemClock::elapsedRealtime,
     attendanceWait: suspend (Long) -> Unit = { delay(it) },
+    recoveryStorage: ph.edu.bsit.tcc.ojtdtr.recovery.JournalStorage? = null,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val mutableState = MutableStateFlow<AccountState>(AccountState.RestoringSession)
@@ -107,8 +108,14 @@ class AuthCoordinator internal constructor(context: Context,
     internal fun currentProof(ticket: Any): Boolean =
         attendance.state.value != AttendanceState.AccessDenied &&
         (ticket as? AttendanceBinding)?.let(::currentAttendance) == true
+    private val recoveryJournal = ph.edu.bsit.tcc.ojtdtr.recovery.RecoveryJournal(
+        recoveryStorage ?: ph.edu.bsit.tcc.ojtdtr.recovery.EncryptedJournalStorage(context))
+    private val recoveryOwner = ph.edu.bsit.tcc.ojtdtr.recovery.AttendanceRecovery(scope, recoveryJournal)
+    val recovery = recoveryOwner.state
+    fun checkAttendanceRecovery() { recoveryOwner.check() }
     private var pendingSubmission: ph.edu.bsit.tcc.ojtdtr.proof.AttendanceSubmission? = null
     internal fun permittedAttendanceAction(): AttendanceAction? {
+        if (recoveryOwner.blocksSubmission()) return null
         if (pendingSubmission?.state?.value in listOf(ph.edu.bsit.tcc.ojtdtr.proof.SubmissionState.Ready, ph.edu.bsit.tcc.ojtdtr.proof.SubmissionState.Preparing,
                 ph.edu.bsit.tcc.ojtdtr.proof.SubmissionState.Uploading, ph.edu.bsit.tcc.ojtdtr.proof.SubmissionState.Finalizing,
                 ph.edu.bsit.tcc.ojtdtr.proof.SubmissionState.OutcomeUnknown)) return null
@@ -128,7 +135,7 @@ class AuthCoordinator internal constructor(context: Context,
             ph.edu.bsit.tcc.ojtdtr.proof.DisabledProofBackend, uid, action,
             { currentProof(owner) }, ::trustedAttendanceAction, { revalidateProof(owner) },
             { if (currentProof(owner)) { refreshAttendance(); awaitAttendanceIdle() } },
-            android.os.SystemClock::elapsedRealtime).also { pendingSubmission = it }
+            android.os.SystemClock::elapsedRealtime, journal = recoveryJournal, onJournalChanged = recoveryOwner::attemptChanged).also { pendingSubmission = it }
     }
     internal fun registerProofCancellation(ticket: Any, cancel: () -> Unit): () -> Unit {
         if (currentProof(ticket)) proofCancellations += cancel else cancel()
@@ -162,6 +169,7 @@ class AuthCoordinator internal constructor(context: Context,
     }
 
     private fun clearAttendance() {
+        recoveryOwner.withdraw()
         pendingSubmission?.close(); pendingSubmission = null
         val cancellations = proofCancellations.toList()
         proofCancellations.clear()
@@ -189,7 +197,7 @@ class AuthCoordinator internal constructor(context: Context,
     }
 
     /** Completion barrier for lifecycle verification; exposes no client, session or result. */
-    internal suspend fun awaitAttendanceIdle() { attendanceRequest?.join() }
+    internal suspend fun awaitAttendanceIdle() { attendanceRequest?.join(); recoveryOwner.awaitIdle() }
 
     internal fun widgetPresentation(): ph.edu.bsit.tcc.ojtdtr.widget.WidgetPresentation {
         attendance.reassess()
@@ -235,6 +243,12 @@ class AuthCoordinator internal constructor(context: Context,
     }
 
     init {
+        scope.launch {
+            attendance.state.collect {
+                val owner = attendanceBinding
+                if (owner != null && !currentProof(owner)) recoveryOwner.withdraw()
+            }
+        }
         operation = scope.launch {
             val generation = epoch.advance()
             try {
@@ -320,6 +334,10 @@ class AuthCoordinator internal constructor(context: Context,
                     val owner = AttendanceBinding(generation, active, accepted)
                     attendanceBinding = owner
                     attendance.bind(owner)
+                    accepted.user?.id?.let { uid ->
+                        recoveryOwner.bind(uid, { currentProof(owner) },
+                            ph.edu.bsit.tcc.ojtdtr.recovery.SdkRecoveryReader(active) { currentProof(owner) })
+                    }
                     if (attendanceLifecycle.foreground) refreshAttendance()
                 }
             }

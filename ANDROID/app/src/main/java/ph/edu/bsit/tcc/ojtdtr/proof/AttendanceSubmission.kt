@@ -66,7 +66,7 @@ internal object ProofContract {
     }
 }
 
-/** Main-dispatcher owner. One attempt per authorization lease, never transferable or persistent.
+/** Main-dispatcher owner. One attempt per authorization lease, never transferable. Durable metadata is optional and contains no proof material.
  * Unknown finalization permits receipt reads only; absence never permits another punch. */
 internal class AttendanceSubmission(
     parent: CoroutineScope, private val backend: ProofBackend, private val uid: String,
@@ -74,6 +74,8 @@ internal class AttendanceSubmission(
     private val nextAction: () -> AttendanceAction?, private val revalidate: suspend () -> Boolean,
     private val refresh: suspend () -> Unit, private val elapsed: () -> Long,
     private val clock: () -> Instant = Instant::now, private val deadlineMillis: Long = 20_000,
+    private val journal: ph.edu.bsit.tcc.ojtdtr.recovery.RecoveryJournal? = null,
+    private val onJournalChanged: (Boolean) -> Unit = {},
 ) {
     private val job = SupervisorJob(parent.coroutineContext[Job])
     private val scope = CoroutineScope(parent.coroutineContext + job)
@@ -86,8 +88,28 @@ internal class AttendanceSubmission(
     private var ticket: PreparedProof? = null
     private var location: Fix? = null
     private var sent = false
-    private var closed = false
+    @Volatile private var closed = false
     private var invoked = false
+    private var durable: ph.edu.bsit.tcc.ojtdtr.recovery.RecoveryRecord? = null
+    private suspend fun persist(phase: ph.edu.bsit.tcc.ojtdtr.recovery.RecoveryPhase, prepared: PreparedProof? = ticket) {
+        // The production disabled adapter dispatches nothing and must not create phantom attempts.
+        if (backend === DisabledProofBackend || journal == null) return
+        checkCurrent()
+        val previous = durable
+        try {
+            durable = withContext(Dispatchers.IO) {
+                if (previous == null) journal.begin(uid, requestId, ProofContract.wireAction(action), { !closed && current() })
+                else journal.advance(previous, phase, { !closed && current() }, prepared?.uploadId, prepared?.sessionId)
+            }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Exception) {
+            // An error can follow a successful rename. Block until an explicit read settles storage.
+            if (!closed && current()) onJournalChanged(true)
+            throw failure
+        }
+        checkCurrent()
+        onJournalChanged(true)
+    }
     private fun checkCurrent() { if (closed || !current()) throw SubmissionFailure(SubmissionProblem.Authorization) }
     private suspend fun authorize() { checkCurrent(); if (!revalidate()) throw SubmissionFailure(SubmissionProblem.Authorization); checkCurrent() }
     fun submit(proof: ConfirmedProof) {
@@ -100,15 +122,20 @@ internal class AttendanceSubmission(
                 if (proof.bytes.size !in 1..5242880 || !proof.fix.valid(elapsed())) throw SubmissionFailure(SubmissionProblem.InvalidProof)
                 location = proof.fix
                 mutable.value = SubmissionState.Preparing
+                persist(ph.edu.bsit.tcc.ojtdtr.recovery.RecoveryPhase.PrepareIntent)
                 val raw = withTimeout(deadlineMillis) { backend.prepare(requestId, action) }
                 checkCurrent()
                 val prepared = ProofContract.prepared(raw, uid, clock()); ticket = prepared
+                persist(ph.edu.bsit.tcc.ojtdtr.recovery.RecoveryPhase.Prepared)
                 authorize()
                 if (!proof.fix.valid(elapsed())) throw SubmissionFailure(SubmissionProblem.InvalidProof)
                 mutable.value = SubmissionState.Uploading
+                persist(ph.edu.bsit.tcc.ojtdtr.recovery.RecoveryPhase.UploadIntent)
                 withTimeout(deadlineMillis) { backend.upload(ProofContract.BUCKET, prepared.path, proof.bytes) }
+                persist(ph.edu.bsit.tcc.ojtdtr.recovery.RecoveryPhase.Uploaded)
                 authorize()
                 if (clock() >= prepared.expires || !proof.fix.valid(elapsed())) throw SubmissionFailure(SubmissionProblem.InvalidProof)
+                persist(ph.edu.bsit.tcc.ojtdtr.recovery.RecoveryPhase.FinalizeIntent)
                 mutable.value = SubmissionState.Finalizing; sent = true
                 val response = withTimeout(deadlineMillis) { backend.finalize(prepared.uploadId, proof.fix) }
                 checkCurrent()
@@ -133,7 +160,14 @@ internal class AttendanceSubmission(
             SubmissionState.Disabled else SubmissionState.Failed
     }
     private suspend fun complete() {
-        checkCurrent(); mutable.value = SubmissionState.Completed; errors.value = null; location = null
+        checkCurrent()
+        if (durable != null) {
+            val confirmed = durable!!
+            withContext(Dispatchers.IO) { journal!!.confirmAndClear(confirmed) { !closed && current() } }
+            checkCurrent()
+            onJournalChanged(false)
+        }
+        mutable.value = SubmissionState.Completed; errors.value = null; location = null
         // UI/widget is always updated by the existing trusted coordinator, never by receipt data.
         try { refresh() } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) { /* The confirmed punch remains completed; read refresh can fail independently. */ }
