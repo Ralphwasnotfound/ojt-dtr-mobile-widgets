@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!-- Plain fixture Application + one empty non-exported Activity cannot reach this shared
+         hardware implementation. Runtime fixture tests assert no components or GPS permissions.
+         Normal debug/release lint does not load this file. Permission errors in other files remain active. -->
+    <issue id="MissingPermission">
+        <ignore path="**/src/main/java/ph/edu/bsit/tcc/ojtdtr/proof/ProofHardware.kt" />
+    </issue>
+</lint>

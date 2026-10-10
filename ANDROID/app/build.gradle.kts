@@ -39,6 +39,8 @@ fun buildStringLiteral(value: String): String = "\"" + value.replace("\\", "\\\\
     .replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r") + "\""
 
 android {
+    // Explicit verification build selection; normal debug instrumentation remains unchanged.
+    testBuildType = if (providers.gradleProperty("isolatedRecoveryTest").orNull == "true") "isolated" else "debug"
     namespace = "ph.edu.bsit.tcc.ojtdtr"
     compileSdk = 36
     buildToolsVersion = "36.0.0"
@@ -54,9 +56,22 @@ android {
         buildConfigField("String", "SUPABASE_CLIENT_KEY", buildStringLiteral(nativeClientKey))
     }
     buildTypes {
+        // Separate debug-only UID/sandbox; never install over the companion package.
+        create("isolated") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".recoveryfixture"
+            matchingFallbacks += "debug"
+            buildConfigField("String", "SUPABASE_URL", "\"\"")
+            buildConfigField("String", "SUPABASE_CLIENT_KEY", "\"\"")
+        }
         release {
             isMinifyEnabled = false
         }
+    }
+    if (testBuildType == "isolated") {
+        sourceSets.getByName("androidTest").java.setSrcDirs(emptyList<String>())
+        // Known unreachable hardware source only, under isolated test selection. No permission grant.
+        lint.lintConfig = file("src/isolated/lint.xml")
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

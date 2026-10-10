@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission tools:node="removeAll" />
+    <uses-feature tools:node="removeAll" />
+    <!-- Replace the entire application tree: no DtrApplication/auth/widget/startup hooks. -->
+    <application android:name="android.app.Application" android:allowBackup="false"
+        android:label="Isolated recovery fixture" android:theme="@style/Theme.OjtDtr"
+        tools:node="replace">
+        <activity android:name="ph.edu.bsit.tcc.ojtdtr.recovery.ProcessDeathActivity" android:exported="false" />
+    </application>
+</manifest>
